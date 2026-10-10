@@ -1,0 +1,18 @@
+{
+	"luci-app-openfi-modem": {
+		"description": "OpenFi 6C 5G 模组:读状态、发 AT、复位",
+		"read": {
+			"ubus": { "file": [ "exec", "read" ] },
+			"file": {
+				"/usr/sbin/openfi-modem": [ "exec" ],
+				"/var/run/openfi-modem.json": [ "read" ]
+			},
+			"uci": [ "openfi_modem" ]
+		},
+		"write": {
+			"ubus": { "file": [ "exec" ] },
+			"file": { "/usr/sbin/openfi-modem": [ "exec" ] },
+			"uci": [ "openfi_modem" ]
+		}
+	}
+}

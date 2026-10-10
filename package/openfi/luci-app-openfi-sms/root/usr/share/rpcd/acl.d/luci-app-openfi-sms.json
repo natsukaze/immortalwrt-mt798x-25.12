@@ -1,0 +1,21 @@
+{
+	"luci-app-openfi-sms": {
+		"description": "OpenFi 6C 短信:读列表、发送、删除",
+		"read": {
+			"ubus": { "file": [ "exec", "read" ] },
+			"file": {
+				"/usr/bin/openfi-sms": [ "exec" ],
+				"/etc/openfi-sms/*": [ "read" ]
+			},
+			"uci": [ "openfi_sms" ]
+		},
+		"write": {
+			"ubus": { "file": [ "exec" ] },
+			"file": {
+				"/usr/bin/openfi-sms": [ "exec" ],
+				"/etc/openfi-sms/*": [ "read", "write", "list", "delete" ]
+			},
+			"uci": [ "openfi_sms" ]
+		}
+	}
+}

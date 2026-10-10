@@ -18,20 +18,19 @@ name: build-openfi6c-25.12
 #   工具链只跟「内核版本 / 工具链版本 / feed 列表」有关，跟「选了哪些包」无关。
 #   之前把 defconfig 哈希写进去，结果动一下 defconfig 就缓存全失效、白重建十几分钟。
 #
-# ── 「带上 LuCI 包」开关（workflow_dispatch 的 with_packages）──────────
-#   打开 → 把同账号下的 openfi6c-packages 编进固件（风扇/状态灯、模组信息、短信）
-#   关闭 → 只出裸固件
-#   push / schedule 没有这个输入，按「打开」处理。
+# ── OpenFi 自己的包 ──────────────────────────────────────────────────
+#   三个包（散热 / 5G 模组 / 短信）和它们共用的库都在 package/openfi/ 下，
+#   defconfig 里已经选中 —— 也就是说【每次编出来都自带】，不需要额外开关。
+#
+#   为什么不走 feed：
+#     · 少一层"拉取"，就少一处会坏的地方（feed 挂不上、包名撞车、要等 push）
+#     · 改包的时候直接跟着固件一起提交，版本天然一致
 #
 # 成功后在 Releases 里出两个文件：固件本体 + 它的 MD5 文本。
 
 on:
   workflow_dispatch:
     inputs:
-      with_packages:
-        description: '把 openfi6c-packages 的 LuCI 包一起编进固件'
-        type: boolean
-        default: true
       publish:
         description: '编译成功后创建版本发布'
         type: boolean
@@ -73,14 +72,6 @@ jobs:
       - name: 决定是否带 LuCI 包
         id: opt
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            v="${{ inputs.with_packages }}"
-          else
-            v="true"
-          fi
-          case "$v" in true) v=true ;; *) v=false ;; esac
-          echo "with_packages=$v" >> "$GITHUB_OUTPUT"
-          echo "把 openfi6c-packages 编进固件: $v"
 
       - name: 取出源码
         uses: actions/checkout@v4
@@ -115,15 +106,28 @@ jobs:
               || { echo "::error::filogic.mk 里缺少: $k"; fail=1; }
           done
 
-          echo "----- openfi6c 的 feed 在不在 -----"
-          grep -q 'openfi6c-packages' feeds.conf.default \
-            || { echo "::error::feeds.conf.default 里没有 openfi6c 的包源"; fail=1; }
+          echo "----- 我们自己的包在不在树里、能不能被扫到 -----"
+          # feed 扫描器靠 Makefile 里的 call BuildPackage 建索引；
+          # 少了那行包会变成未知配置项，被 make defconfig 悄悄丢掉。
+          for p in openfi-lib luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
+            f="package/openfi/$p/Makefile"
+            [ -e "$f" ] || { echo "::error::缺少 $f"; fail=1; continue; }
+            grep -q 'call BuildPackage' "$f" \
+              || { echo "::error::$f 里没有 call BuildPackage，扫描器看不见它"; fail=1; }
+          done
 
           echo "----- dts 引用的节点（这些必须由 dtsi 或 MTK patch 提供）-----"
           for n in eth spi0 pio pwm uart0 usb_phy xhci wifi watchdog; do
             grep -q "^&$n {" target/linux/mediatek/dts/mt7981b-openfi-6c.dts \
               || echo "::warning::dts 里没有 &$n 覆盖块（可能是有意省略）"
           done
+
+          echo "----- 灯名核对（01_leds 引用的灯，DTS 里真的定义了吗）-----"
+          # 上游给 openfi,6c 写的那段是从别的板子抄来的（引用 green:lan 和 eth0，
+          # 本板都没有）。灯名写错时内核【不报错】，只是灯不亮 —— 上机才发现。
+          # 所以在这里拦住：名字对不上就别往下编了。
+          python3 scripts/openfi/check-leds.py \
+            || { echo "::error::LED 名字对不上，编出来灯不会亮"; fail=1; }
 
           [ "$fail" -eq 0 ] || exit 1
           echo "✅ 板级接线自检通过"
@@ -213,25 +217,17 @@ jobs:
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          if [ "${{ steps.opt.outputs.with_packages }}" = "true" ]; then
-            C=$(git -C feeds/openfi6c rev-parse --short HEAD 2>/dev/null || echo "?")
-            echo "pkg_commit=$C" >> "$GITHUB_OUTPUT"
-            echo "----- openfi6c feed 实际拉到的提交 -----"
-            git -C feeds/openfi6c log -1 --format='%H %ad %s' --date=short 2>/dev/null || true
-          else
-            echo "pkg_commit=" >> "$GITHUB_OUTPUT"
-          fi
+          # 我们自己的包在树里（package/openfi/），跟着固件仓库一起版本化，
+          # 所以"包版本"就是当前这次提交 —— 发布说明里带上它，方便回查。
+          C=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
+          echo "pkg_commit=$C" >> "$GITHUB_OUTPUT"
+          echo "----- 树内包（package/openfi/）-----"
+          ls package/openfi/ 2>/dev/null || true
 
       - name: 应用配置
         run: |
           cp defconfig/openfi6c.config .config
-          if [ "${{ steps.opt.outputs.with_packages }}" = "true" ]; then
-            cat >> .config <<'EOF'
-          CONFIG_PACKAGE_luci-app-openfi-fan=y
-          CONFIG_PACKAGE_luci-app-openfi-sms=y
-          CONFIG_PACKAGE_luci-app-openfi-modem=y
-          EOF
-          fi
+          # 三个包的 CONFIG 已经写在 defconfig 里了，这里不用再追加
           make defconfig
 
           echo "----- 关键配置确认 -----"
@@ -259,14 +255,17 @@ jobs:
             && { echo "::error::initramfs 被打开了 —— 我们只发 sysupgrade，不需要它"; exit 1; } || true
           echo "OK: initramfs 已关闭"
 
-          if [ "${{ steps.opt.outputs.with_packages }}" = "true" ]; then
-            echo "----- 断言三个 LuCI 包真的被选中 -----"
-            for s in luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
-              grep -q "^CONFIG_PACKAGE_${s}=y" .config \
-                || { echo "::error::${s} 没进 .config（feed 没挂上或包名写错）"; exit 1; }
-              echo "OK: ${s}=y"
-            done
-          fi
+          echo "----- 断言我们自己的三个包真的被选中 -----"
+          # 包在 package/openfi/ 下，走树内编译。进不了 .config 就说明
+          # 包 Makefile 有问题（少了 call BuildPackage）或 defconfig 没写对。
+          for s in luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
+            grep -q "^CONFIG_PACKAGE_${s}=y" .config \
+              || { echo "::error::${s} 没进 .config"; exit 1; }
+            echo "OK: ${s}=y"
+          done
+          grep -q "^CONFIG_PACKAGE_openfi-lib=" .config \
+            || { echo "::error::openfi-lib 没被依赖带进来"; exit 1; }
+          echo "OK: openfi-lib（被 DEPENDS 自动带进来）"
 
           echo "----- 提醒：USB 数据通道驱动是写在 filogic.mk 的 DEVICE_PACKAGES 里的 -----"
           echo "      （不经过 .config，所以这里看不到；编完用下面的 manifest 断言检查）"
@@ -369,13 +368,8 @@ jobs:
             TAG="${TAG}-$(git rev-parse --short HEAD)"
           fi
           FWNAME=$(cd out && ls | grep sysupgrade | head -1)
-          if [ "${{ steps.opt.outputs.with_packages }}" = "true" ]; then
-            PKG_ROW="**已内置** \`luci-app-openfi-fan\` + \`luci-app-openfi-modem\` + \`luci-app-openfi-sms\` @ \`${{ steps.feeds.outputs.pkg_commit }}\`"
-            FAN_ROW='由 `luci-app-openfi-fan` 管理：四点温度曲线 + 状态灯'
-          else
-            PKG_ROW='未内置（可在 Actions 里手动运行本工作流，把 `with_packages` 打开）'
-            FAN_ROW='本版**不含**管理（dts 里 pwm-fan 保持 disabled，两路 PWM 留给用户态）'
-          fi
+          PKG_ROW='**已内置** `luci-app-openfi-fan`（散热）+ `luci-app-openfi-modem`（5G 模组）+ `luci-app-openfi-sms`（短信），源码在 `package/openfi/`'
+          FAN_ROW='由 `luci-app-openfi-fan` 管理：四点温度曲线 + 迟滞 + 静默档 + 过热兜底' 
           cat > /tmp/notes.md <<NOTES
           ## OpenFi 6C 固件 $TAG
 

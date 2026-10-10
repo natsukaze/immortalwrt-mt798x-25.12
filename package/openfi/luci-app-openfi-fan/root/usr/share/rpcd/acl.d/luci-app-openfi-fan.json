@@ -1,0 +1,24 @@
+{
+	"luci-app-openfi-fan": {
+		"description": "OpenFi 6C 风扇控制:读状态、改 openfi 配置",
+		"read": {
+			"ubus": {
+				"file": [ "exec", "read" ]
+			},
+			"file": {
+				"/usr/sbin/openfi-fan": [ "exec" ],
+				"/var/run/openfi-fan.json": [ "read" ]
+			},
+			"uci": [ "openfi" ]
+		},
+		"write": {
+			"ubus": {
+				"file": [ "exec" ]
+			},
+			"file": {
+				"/usr/sbin/openfi-fan": [ "exec" ]
+			},
+			"uci": [ "openfi" ]
+		}
+	}
+}

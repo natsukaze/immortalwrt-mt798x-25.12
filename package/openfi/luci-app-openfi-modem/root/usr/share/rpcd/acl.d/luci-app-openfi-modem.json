@@ -1,18 +1,66 @@
 {
 	"luci-app-openfi-modem": {
-		"description": "OpenFi 6C 5G 模组:读状态、发 AT、复位",
+		"description": "OpenFi 6C 5G 模组:读状态、查询、复位、AT 终端",
 		"read": {
-			"ubus": { "file": [ "exec", "read" ] },
-			"file": {
-				"/usr/sbin/openfi-modem": [ "exec" ],
-				"/var/run/openfi-modem.json": [ "read" ]
+			"ubus": {
+				"file": [
+					"exec",
+					"read"
+				]
 			},
-			"uci": [ "openfi_modem" ]
+			"file": {
+				"/usr/sbin/openfi-modem status": [
+					"exec"
+				],
+				"/usr/sbin/openfi-modem": [
+					"exec"
+				],
+				"/usr/sbin/openfi-modem refresh": [
+					"exec"
+				],
+				"/usr/sbin/openfi-modem reset": [
+					"exec"
+				],
+				"/usr/sbin/openfi-modem at *": [
+					"exec"
+				],
+				"/var/run/openfi-modem.json": [
+					"read"
+				]
+			},
+			"uci": [
+				"openfi"
+			]
 		},
 		"write": {
-			"ubus": { "file": [ "exec" ] },
-			"file": { "/usr/sbin/openfi-modem": [ "exec" ] },
-			"uci": [ "openfi_modem" ]
+			"ubus": {
+				"file": [
+					"exec"
+				]
+			},
+			"file": {
+				"/usr/sbin/openfi-modem status": [
+					"exec"
+				],
+				"/usr/sbin/openfi-modem": [
+					"exec"
+				],
+				"/usr/sbin/openfi-modem refresh": [
+					"exec"
+				],
+				"/usr/sbin/openfi-modem reset": [
+					"exec"
+				],
+				"/usr/sbin/openfi-modem at *": [
+					"exec"
+				],
+				"/var/run/openfi-modem.json": [
+					"read"
+				]
+			},
+			"uci": [
+				"openfi"
+			]
 		}
 	}
 }

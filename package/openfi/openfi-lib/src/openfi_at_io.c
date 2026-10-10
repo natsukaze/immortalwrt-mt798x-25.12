@@ -159,6 +159,50 @@ static int read_until(struct at_port *p, int timeout_ms, char *out, size_t outle
 	return 0;
 }
 
+int at_wait_prompt(struct at_port *p, int timeout_ms)
+{
+	long long remain = timeout_ms;
+
+	if (!p || p->fd < 0)
+		return -1;
+	while (remain > 0) {
+		fd_set rfds;
+		struct timeval tv;
+		int rc;
+
+		FD_ZERO(&rfds);
+		FD_SET(p->fd, &rfds);
+		tv.tv_sec = (time_t)(remain / 1000);
+		tv.tv_usec = (suseconds_t)((remain % 1000) * 1000);
+
+		rc = select(p->fd + 1, &rfds, NULL, NULL, &tv);
+		if (rc < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (rc == 0)
+			break;			/* 超时 */
+		{
+			char buf[256];
+			ssize_t n = read(p->fd, buf, sizeof(buf));
+
+			if (n < 0) {
+				if (errno == EINTR || errno == EAGAIN)
+					continue;
+				return -1;
+			}
+			if (n == 0)
+				break;
+			for (ssize_t i = 0; i < n; i++)
+				if (buf[i] == '>')
+					return 0;
+		}
+		remain -= 50;
+	}
+	return -1;			/* 没等到提示 */
+}
+
 int at_cmd(struct at_port *p, const char *cmd, int timeout_ms, struct at_resp *r)
 {
 	char out[8192], line[AT_LINE_MAX + 4];

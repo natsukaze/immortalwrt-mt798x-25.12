@@ -73,12 +73,29 @@ F=$P/luci-app-openfi-sms/src/openfi_sms.c
 echo "── PDU 编解码 ──"
 mut "地址解码:数字从下标 2 改成 1" "$F" \
 	"for (int i = 2; i < total_bytes" "for (int i = 1; i < total_bytes" "$T_SMS"
-mut "7 位解包:septet 数减 1" "$F" \
-	"sms_unpack_7bit(ud, sept, s->text" "sms_unpack_7bit(ud, sept-1, s->text" "$T_SMS"
-mut "UDH 偏移:少跳 1 字节" "$F" \
-	"(udh_len ? udh_len + 1 : 0)" "(udh_len ? udh_len : 0)" "$T_SMS"
+mut "7位+UDH:起始 septet 当成 0(错 1 位)" "$F" \
+	"sms_unpack_7bit_at(b + ud_start, start_sept, sept," "sms_unpack_7bit_at(b + ud_start, 0, sept," "$T_SMS"
+mut "UDH 填充位:不加(按字节对齐)" "$F" \
+	"fill = (7 - (bits % 7)) % 7;" "fill = 0;" "$T_SMS"
 mut "扩展表:改错 [ 的下标" "$F" "{ 0x3C, \"[\" }" "{ 0x34, \"[\" }" "$T_SMS"
-mut "7 位 UDL 当字节数用" "$F" "int sept = udl;" "int sept = udlen;" "$T_SMS"
+mut "截断报文:夹长度而不是报错" "$F" \
+	"if (ud_start + udlen > n)
+		return -1;" "if (ud_start + udlen > n)
+		udlen = n - ud_start;" "$T_SMS"
+# 注:单纯去掉 UDHL 的越界检查是"等价变异" —— 后面的 body<0 仍会拒绝,
+#     所以这里改成同时去掉两道防线,才是真正能区分的变异。
+# ★ UDHL 越界这块代码有【两道】防线:
+#     ① if (udh_bytes > udlen) return -1;     —— 显式拒绝畸形报文
+#     ② if (body < 0) return -1;              —— 长度算成负数时的兜底
+#   两处语义重叠,单独去掉任何一处行为都不变 —— 这是"等价变异",
+#   而它恰恰说明防御是有效的(不是测试盲区)。所以这里只针对第 ② 道
+#   设变异:去掉它之后,①仍然拦住,仍然等价,故不计入本清单。
+mut "UCS2 正文:长度不减 UDH(多解出字段外数据)" "$F" \
+	"int body = udlen - udh_bytes;" "int body = udlen;" "$T_SMS"
+mut "UCS2+UDH:少减 UDHL 那一字节" "$F" \
+	"int body = udlen - udh_bytes;" "int body = udlen - udh_len;" "$T_SMS"
+mut "CMGS 长度:总字节数减 1" "$F" \
+	"smsc = 2 + (digits + 1) / 2;" "smsc = 1;" "$T_SMS"
 mut "UCS2 判定用错位" "$F" "if ((dcs_raw & 0x0C) == 0x08)" "if ((dcs_raw & 0x0C) == 0x04)" "$T_SMS"
 
 echo "── 风扇状态机 ──"

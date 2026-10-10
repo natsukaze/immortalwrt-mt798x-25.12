@@ -206,6 +206,11 @@ return view.extend({
 		o.value('manual', _('手动固定转速'));
 		o.rmempty = false;
 
+		o = s1.option(form.Value, 'manual_speed', _('固定转速'),
+			_('只在"模式"选手动时生效。留空则回到温度曲线。'));
+		o.datatype = 'range(0,100)';
+		o.depends('mode', 'manual');
+
 		o = s1.option(form.Value, 'period', _('采样周期'),
 			_('每隔几秒采一次温度。越短响应越快,空转唤醒也越多。'));
 		o.datatype = 'range(1,60)';
@@ -263,18 +268,29 @@ return view.extend({
 		var manualBtn = E('button', {
 			'class': 'btn cbi-button cbi-button-apply',
 			'click': ui.createHandlerFn(this, function () {
-				var v = prompt(_('输入固定转速(0-100),留空取消'));
+				/*
+				 * 输入数字 = 固定转速;输入 auto 或留空 = 回到温度曲线。
+				 * ★ 以前这里只是"写一次 PWM 就完事":守护进程下一个周期
+				 *   就把转速覆盖回曲线值,用户看到的效果是"设了但没用"。
+				 *   现在它写的是一个守护进程会读的覆盖标记,能一直生效,
+				 *   直到用户改回 auto。
+				 */
+				var v = prompt(_('固定转速(0-100);输入 auto 回到温度曲线'), 'auto');
 
-				if (v === null || v === '') return;
-				var n = parseInt(v, 10);
+				if (v === null) return;
+				v = (v + '').trim();
+				var arg = /^auto$/i.test(v) ? 'auto' : String(parseInt(v, 10));
 
-				if (isNaN(n) || n < 0 || n > 100) {
-					ui.addNotification(null, E('p', {}, _('转速必须是 0 到 100 之间的整数')), 'error');
+				if (arg !== 'auto' && (isNaN(parseInt(arg, 10)) ||
+				    parseInt(arg, 10) < 0 || parseInt(arg, 10) > 100)) {
+					ui.addNotification(null, E('p', {}, _('请输入 0 到 100 的整数,或 auto')), 'error');
 					return;
 				}
-				return fs.exec(BIN, ['--speed', String(n)]).then(function (r) {
+				return fs.exec(BIN, ['--speed', arg]).then(function (r) {
 					ui.addNotification(null, E('p', {},
-						r.code === 0 ? _('已设为 %d %%').format(n) : _('下发失败')),
+						r.code === 0
+							? (arg === 'auto' ? _('已回到温度曲线') : _('已固定为 %d %%').format(parseInt(arg, 10)))
+							: _('下发失败')),
 						r.code === 0 ? 'info' : 'error');
 					return refresh();
 				});
@@ -304,24 +320,30 @@ return view.extend({
 
 	/*
 	 * 保存并应用。
-	 * ★ 不覆写 handleSave —— 基类有默认实现(真实表单页如 network/wireless.js
-	 *   也都不覆写它)。我原先写了 this.super('handleSave', [ev]),
-	 *   那个 super() 的调用约定和基类签名不一定对得上,轻则保存失败、
-	 *   重则点一下没反应,所以干脆交给基类。
 	 *
-	 * 保存后让守护进程热重载(收到 HUP 原地重读配置,风扇不中断)。
-	 * 另外 procd 那边也配了 file 触发(监听 /etc/config/openfi),
-	 * 所以就算这一步失败,配置也会被应用 —— 这里只是让它立刻生效。
+	 * ★ 两个坑(都是我自己踩出来的,前端审查指出):
+	 *   ① 不能把 handleSave 设成 null —— 这一版 LuCI 的基类 View
+	 *      自己定义了 handleSave/handleSaveApply,而 handleSaveApply
+	 *      内部会调 this.handleSave。设成 null 之后点"保存并应用"
+	 *      会抛 TypeError,而 ui.createHandlerFn 是"先禁用按钮再执行",
+	 *      同步异常让 .finally 跑不到 → 按钮永远灰着转圈,只能刷新页面。
+	 *   ② 更不能自己写一套 —— 落盘(ui.changes.apply)是基类做的,
+	 *      form 的 save 只把改动写进 uci 的暂存区(/tmp/.uci),
+	 *      不调 apply 的话配置永远不落盘,提示却显示"已保存"。
+	 *
+	 * 所以:调基类,成功后再热重载。
 	 */
 	handleSaveApply: function (ev, mode) {
-		return this.handleSave(ev).then(function () {
-			return fs.exec('/etc/init.d/openfi-fan', ['reload']).catch(function () {});
-		}).then(function () {
-			ui.addNotification(null, E('p', {}, _('已保存,风扇已按新配置运行')), 'info');
+		return this.super('handleSaveApply', [ev, mode]).then(function () {
+			/*
+			 * 让守护进程原地重读配置(收到 HUP 重读,风扇不中断)。
+			 * ACL 里已授权这条命令;万一失败也要说出来,不能静默吞掉。
+			 */
+			return fs.exec('/etc/init.d/openfi-fan', ['reload']).catch(function (e) {
+				ui.addNotification(null,
+					E('p', {}, _('配置已保存,但热重载失败(可能要重启服务):') + ' ' + e),
+					'warning');
+			});
 		});
-	},
-
-	handleSave: null,
-
-	handleReset: null
+	}
 });

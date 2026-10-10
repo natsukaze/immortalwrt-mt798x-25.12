@@ -1,21 +1,70 @@
 {
 	"luci-app-openfi-sms": {
-		"description": "OpenFi 6C 短信:读列表、发送、删除",
+		"description": "OpenFi 6C 短信:列表、读取、发送、删除",
 		"read": {
-			"ubus": { "file": [ "exec", "read" ] },
-			"file": {
-				"/usr/bin/openfi-sms": [ "exec" ],
-				"/etc/openfi-sms/*": [ "read" ]
+			"ubus": {
+				"file": [
+					"exec",
+					"read"
+				]
 			},
-			"uci": [ "openfi_sms" ]
+			"file": {
+				"/usr/bin/openfi-sms list *": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms read *": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms send *": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms delete *": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms unread": [
+					"exec"
+				],
+				"/etc/openfi-sms/*": [
+					"read",
+					"write",
+					"list"
+				]
+			}
 		},
 		"write": {
-			"ubus": { "file": [ "exec" ] },
-			"file": {
-				"/usr/bin/openfi-sms": [ "exec" ],
-				"/etc/openfi-sms/*": [ "read", "write", "list", "delete" ]
+			"ubus": {
+				"file": [
+					"exec"
+				]
 			},
-			"uci": [ "openfi_sms" ]
+			"file": {
+				"/usr/bin/openfi-sms list *": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms read *": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms send *": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms delete *": [
+					"exec"
+				],
+				"/usr/bin/openfi-sms unread": [
+					"exec"
+				],
+				"/etc/openfi-sms/*": [
+					"read",
+					"write",
+					"list"
+				]
+			}
 		}
 	}
 }

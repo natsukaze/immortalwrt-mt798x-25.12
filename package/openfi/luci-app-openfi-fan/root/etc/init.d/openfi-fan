@@ -16,7 +16,10 @@ start_service() {
 	# 崩了就拉起来;5 秒内最多重启 10 次,再不行就放弃(免得疯狂重启刷日志)
 	procd_set_param respawn 3600 5 10
 	# 配置文件变了就自动 restart
-	procd_set_param file /etc/config/openfi
+	# ★ 不要 procd_set_param file /etc/config/openfi:
+	#   下面已经用 procd_add_reload_trigger 注册了同一个文件的变更。
+	#   两个机制同时挂一个文件,提交配置时会既重启实例又发 HUP,
+	#   "原地重读、风扇不停"就落空了。只保留 reload trigger。
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance

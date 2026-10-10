@@ -23,6 +23,19 @@ define Package/openfi-lib
   DEPENDS:=
 endef
 
+/*
+ * ★ 必须有 install 段。
+ *   OpenWrt 的打包规则是:没有 install 段就只打印
+ *   "skipping <name> -- package has no install section",不产出 .ipk/.apk。
+ *   而三个应用包都写着 DEPENDS:=+openfi-lib —— 依赖解析时找不到提供者,
+ *   整个 image 构建就会失败。
+ *   这个库是纯静态链接用的(staging 里有头文件和 .a 就够),
+ *   所以运行期不需要装任何东西 —— 但包本身必须存在。
+ */
+define Package/openfi-lib/install
+	$(INSTALL_DIR) $(1)/usr/lib
+endef
+
 define Package/openfi-lib/description
   OpenFi 6C 后端各包共用的基础设施:
     uci 配置读取(自己解析 UCI 文件,不依赖 libuci)

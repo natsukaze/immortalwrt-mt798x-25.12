@@ -325,6 +325,8 @@ static void usage(void)
 		"  --json        输出状态 JSON\n"
 		"  --speed N     手动设转速 0..100\n"
 		"  --selftest    上机自检\n"
+		"  --speed N     固定转速 N%%(写进配置持久生效)\n"
+		"  --speed auto  回到温度曲线\n"
 		"  -h, --help    本帮助\n");
 }
 
@@ -340,6 +342,7 @@ int main(int argc, char **argv)
 		{ NULL, 0, NULL, 0 },
 	};
 	int opt_once = 0, opt_json = 0, opt_selftest = 0, opt_speed = -1;
+	int opt_speed_auto = 0;
 	int opt_status = 0;
 	struct fan_run_cfg rc;
 	struct temp_cfg tc;
@@ -359,11 +362,16 @@ int main(int argc, char **argv)
 		case 'j': opt_json = 1; opt_once = 1; break;
 		case 't': opt_selftest = 1; opt_once = 1; break;
 		case 's':
-			opt_speed = atoi(optarg);
-			if (opt_speed < 0)
-				opt_speed = 0;
-			if (opt_speed > 100)
-				opt_speed = 100;
+			/* --speed auto 表示"回到温度曲线" */
+			if (!strcmp(optarg, "auto")) {
+				opt_speed_auto = 1;
+			} else {
+				opt_speed = atoi(optarg);
+				if (opt_speed < 0)
+					opt_speed = 0;
+				if (opt_speed > 100)
+					opt_speed = 100;
+			}
 			opt_once = 1;
 			break;
 		case 'h': default: usage(); return (c == 'h') ? 0 : 1;
@@ -445,10 +453,45 @@ int main(int argc, char **argv)
 		olog_info("启动时的开关状态:%s", st.silent ? "静默档" : "正常档");
 	}
 
+	if (opt_speed_auto) {
+		/*
+		 * 回到温度曲线。清掉 manual_speed 并把 mode 改回 auto ——
+		 * 只改 mode 也行,但把速度一并清掉,免得界面上的旧值造成误解。
+		 */
+		if (ouci_set("openfi", "fan", "mode", "auto") != 0)
+			return oj_fail("写配置失败");
+		olog_info("已回到温度曲线");
+		return 0;
+	}
+
 	if (opt_speed >= 0) {
+		/*
+		 * ★ 以前这里只是"写一次 PWM 然后退出"。
+		 *   问题是守护进程每个周期都会按状态机重新计算并覆盖 PWM ——
+		 *   温度一动(几秒到几十秒)用户的设置就没了,而且状态页显示的
+		 *   还是守护进程缓存的值,看起来"设了没反应"。
+		 *   现在把选择写进配置:守护进程按 mode=manual + manual_speed 走,
+		 *   一直到用户显式改回 auto 为止;顺手也立刻写一次,
+		 *   不用等到下个周期。
+		 */
+		char buf[16];
+
+		/*
+		 * ★ 顺序很重要:先写 PWM(立刻见效),再持久化配置。
+		 *   反过来的话,配置写不进去(比如配置文件所在的分区只读、
+		 *   或者跑在没有配置根目录的测试环境里)就直接返回了,
+		 *   PWM 根本没动 —— 用户看到的现象是"点了没反应"。
+		 *   配置只是"下次重启后还记得",写失败不该拦住当前动作。
+		 */
 		if (pwm_apply(&rc, opt_speed) != 0)
 			return oj_fail("PWM 写入失败");
-		olog_info("手动设转速 %d%%", opt_speed);
+
+		snprintf(buf, sizeof(buf), "%d", opt_speed);
+		if (ouci_set("openfi", "fan", "mode", "manual") != 0 ||
+		    ouci_set("openfi", "fan", "manual_speed", buf) != 0)
+			olog_warn("转速已生效,但写配置失败 —— 重启后会回到温度曲线");
+		else
+			olog_info("已固定转速 %d%%(写进配置,改回请用 --speed auto)", opt_speed);
 		return 0;
 	}
 

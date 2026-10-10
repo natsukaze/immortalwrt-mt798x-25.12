@@ -36,6 +36,19 @@ void sms_store_set_dir(const char *dir)
 	copy_str(g_dir, sizeof(g_dir), (dir && *dir) ? dir : DIR_DEFAULT);
 }
 
+int sms_id_ok(const char *id)
+{
+	if (!id || !*id || strlen(id) > 64)
+		return 0;
+	for (const char *p = id; *p; p++)
+		if (!((p[0] >= '0' && p[0] <= '9') ||
+		      (p[0] >= 'a' && p[0] <= 'z') ||
+		      (p[0] >= 'A' && p[0] <= 'Z') ||
+		      p[0] == '-' || p[0] == '_'))
+			return 0;
+	return 1;
+}
+
 const char *sms_store_dir(void)
 {
 	return g_dir;
@@ -317,11 +330,33 @@ int sms_store_list(struct sms_msg *out, int max)
 		qsort(all, (size_t)have, sizeof(all[0]), cmp_desc);
 	}
 
-	int n = total < max ? total : max;
+	/*
+	 * ★ 拷贝条数要同时受三个上界约束:
+	 *     ① max  —— 调用方要几条
+	 *     ② have —— 我们内部数组实际收了几条
+	 *     ③ SMS_STORE_MAX_LIST —— 调用方数组容量的约定值
+	 *
+	 *   以前只判 ①(max),而 total 是"目录里的文件总数"(可以远大于
+	 *   内部数组的 512):库存 520 条 + `list 600` 时 n=520,
+	 *   于是既越界读 all[512..519],又往调用方的 512 项数组里越界写。
+	 *   函数契约也写清楚了:调用方数组必须至少有 SMS_STORE_MAX_LIST 项。
+	 */
+	{
+		int have = total > (int)(sizeof(all) / sizeof(all[0]))
+			 ? (int)(sizeof(all) / sizeof(all[0])) : total;
 
-	for (int i = 0; i < n; i++)
-		out[i] = all[i];
-	return total;
+		if (max > have)
+			max = have;
+		if (max > SMS_STORE_MAX_LIST)
+			max = SMS_STORE_MAX_LIST;
+		if (max < 0)
+			max = 0;
+
+		for (int i = 0; i < max; i++)
+			out[i] = all[i];
+
+		return max;		/* 返回【实际填入的条数】*/
+	}
 }
 
 int sms_store_unread(void)
@@ -338,7 +373,24 @@ int sms_store_unread(void)
 
 int sms_store_count(void)
 {
-	static struct sms_msg all[512];
+	/*
+	 * ★ 直接数目录,不要借道 sms_store_list。
+	 *   list 的返回值现在是"实际填入调用方数组的条数"(它必须受调用方
+	 *   数组大小约束,否则就会越界 —— 那是之前的一个真 bug),
+	 *   所以它不再能当"库存总数"用。这里独立数一遍。
+	 */
+	DIR *d = opendir(g_dir);
+	struct dirent *de;
+	int n = 0;
 
-	return sms_store_list(all, 0);
+	if (!d)
+		return 0;
+	while ((de = readdir(d))) {
+		size_t l = strlen(de->d_name);
+
+		if (l >= 6 && strcmp(de->d_name + l - 5, ".json") == 0)
+			n++;
+	}
+	closedir(d);
+	return n;
 }

@@ -215,6 +215,155 @@ int main(void)
 		}
 	}
 
+	printf("── ★ 手写规范向量(往返测试永远查不出这类错误)──\n");
+	/*
+	 * 为什么必须有这一段:
+	 *   带 UDH 的 7 位短信,规范要求在 UDH 之后补填充位,让正文从
+	 *   septet 边界开始(6 字节 UDH → 48 位,48%7=6 → 补 1 位 → 第 49 位)。
+	 *   我们的 pack 和 unpack 用的是同一套位运算,所以"自己编自己解"
+	 *   不管对错都能通过 —— 必须拿【独立算出来的规范报文】验证。
+	 *
+	 *   这条向量是照 GSM 03.40 §9.2.3.24 手算的:
+	 *     SMSC 长度 07 91 68 31 08 10 83 00 F0
+	 *     FO=44(UDHI) MR=00 长度=0D 地址=91 683108108300F0
+	 *     PID=00 DCS=00 时间戳 62 10 10 00 00 00 00
+	 *     UDL=08 UD= 05 00 03 2A 02 01 82
+	 *   其中 82 = 1000 0010:bit48 是填充位 0,正文 'A'(0x41)
+	 *   从 bit49 起 —— 按字节对齐去读会得到 0x82 的低 6 位 + 下一位,
+	 *   解出 '$' 而不是 'A'(这正是我们原来的 bug)。
+	 */
+	{
+		const char *spec_A =
+			"0D91683108108300F0440D91683108108300F000006210100000000008"
+			"0500032A020182";
+		struct sms t;
+
+		T_EQ_INT(sms_decode_pdu(spec_A, &t), 0);
+		T_EQ_STR(t.text, "A");
+		T_EQ_INT(t.concat_total, 2);
+		T_EQ_INT(t.concat_seq, 1);
+		T_EQ_INT(t.concat_ref, 0x2A);
+	}
+
+	printf("── ★ 反向:我们编出来的必须和规范报文一致 ──\n");
+	{
+		char h[SMS_HEX_MAX];
+		struct sms t;
+
+		T_EQ_INT(sms_encode_pdu("", "10086", "A", -1, 2, 1, 0x2A,
+					h, sizeof(h)), 0);
+		/* 关键就是结尾那一段:UDH + 补 1 位之后的正文 */
+		T_OK(strstr(h, "0500032a020182") != NULL);
+		/* 而且自己解回来也要对 */
+		T_EQ_INT(sms_decode_pdu(h, &t), 0);
+		T_EQ_STR(t.text, "A");
+	}
+
+	printf("── ★ AT+CMGS=<len> 要用 TPDU 字节数(不含短信中心字段)──\n");
+	/*
+	 * 规范(27.005)说的是 TPDU 字节数,不含整个 SMSC 字段。
+	 * 以前图省事写"总字节数 - 1",只在短信中心为空时才对;
+	 * 配上短信中心号就多算 8 个字节,模组会一直等剩下的数据。
+	 * 而设备第一次 collect 就会把 AT+CSCA? 读到的号写进配置 ——
+	 * 也就是说这个坑是"必然踩到"。
+	 */
+	{
+		char h[SMS_HEX_MAX];
+		struct { const char *sca; int digits; } cs[] = {
+			{ "", 0 },
+			{ "13800138000", 11 },
+			{ "+8613800138000", 13 },
+			{ "+86138001380000", 14 },
+		};
+
+		for (size_t i = 0; i < sizeof(cs) / sizeof(cs[0]); i++) {
+			int total, tpdu, smsc;
+
+			T_EQ_INT(sms_encode_pdu(cs[i].sca, "10086", "hi", -1, 0, 0, 0,
+						h, sizeof(h)), 0);
+			total = (int)(strlen(h) / 2);
+			tpdu = sms_tpdu_len(cs[i].sca, h);
+			smsc = cs[i].sca[0] ? 2 + (cs[i].digits + 1) / 2 : 1;
+			T_EQ_INT(tpdu, total - smsc);
+		}
+	}
+
+	printf("── ★ 截断的报文必须被拒绝,不能当成功 ──\n");
+	/*
+	 * 以前 UDL 声明超出实际字节数时只是"夹到可用长度",于是半截
+	 * 短信被当成完整短信入库(实测 "hello" 少一字节 → 解出 "hell"
+	 * 且返回 0)。上层只看返回值,根本发现不了。
+	 */
+	{
+		struct sms t;
+		const char *cut =
+			"0D91683108108300F0040D91683108108300F0000062101000000000"
+			"05E8329BFD";
+
+		T_OK(sms_decode_pdu(cut, &t) != 0);
+	}
+
+	printf("── ★ UDHL 声称比 UD 还长:必须拒绝(远程可触发的越界读)──\n");
+	{
+		struct sms t;
+		/* UDHI + 8bit DCS,UDHL=0xFF 但 UD 只剩几个字节 */
+		const char *bad =
+			"0D91683108108300F0440D91683108108300F0000462101000000000"
+			"04FFAABBCC";
+
+		T_OK(sms_decode_pdu(bad, &t) != 0);
+	}
+
+	printf("── ★ UCS2 + UDH:正文长度要减掉 UDHL 自己那一字节 ──\n");
+	{
+		struct sms t;
+		/* 8bit DCS(04),UDL=0x0A,UD = 05 00 03 2A 02 01 DE AD BE EF + 哨兵 AA */
+		const char *pdu =
+			"0D91683108108300F0440D91683108108300F0000462101000000000"
+			"0A0500032A0201DEADBEEFAA";
+
+		T_EQ_INT(sms_decode_pdu(pdu, &t), 0);
+		/* 正文只能是 4 字节 DEADBEEF;多出来的 AA 是 UD 字段【之后】的数据,
+		   以前会被当成正文解出来(真实场景里那是栈上的未初始化内容) */
+		T_EQ_STR(t.text, "deadbeef");
+	}
+
+	printf("── ★ 段数必须和实际切段一致(否则 UDH 里的 total 是错的)──\n");
+	{
+		char t[700];
+		int i;
+
+		/* 7 位:每段 153 字符,不能用字节数套 153 公式 */
+		for (i = 0; i <= 400; i += 50) {
+			memset(t, 'x', (size_t)i);
+			t[i] = '\0';
+			T_EQ_INT(sms_count_segments(t, -1),
+				 i <= 160 ? 1 : (i + 152) / 153);
+		}
+		/* 中文(UCS2):每段 67 字符 */
+		for (i = 10; i <= 200; i += 30) {
+			int k;
+
+			for (k = 0; k < i; k++) {
+				t[k * 3] = (char)0xE4;
+				t[k * 3 + 1] = (char)0xB8;
+				t[k * 3 + 2] = (char)0xAD;
+			}
+			t[i * 3] = '\0';
+			T_EQ_INT(sms_count_segments(t, -1),
+				 i <= 70 ? 1 : (i + 66) / 67);
+		}
+	}
+
+	printf("── ★ 超长号码必须被拒绝(否则写穿缓冲区)──\n");
+	{
+		char num[2100], h[SMS_HEX_MAX];
+
+		memset(num, '1', sizeof(num) - 1);
+		num[sizeof(num) - 1] = '\0';
+		T_OK(sms_encode_pdu("", num, "hi", -1, 0, 0, 0, h, sizeof(h)) != 0);
+	}
+
 	printf("── 中文编不进 7 位(应失败,让调用方走 UCS2)──\n");
 	T_EQ_INT(sms_pack_7bit("中文", bytes, sizeof(bytes), &sept), -1);
 

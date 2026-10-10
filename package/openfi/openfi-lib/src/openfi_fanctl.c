@@ -163,6 +163,23 @@ int fan_state_step(struct fan_state *st, int unified_temp, long long now_ms)
 		goto force;
 	}
 
+	/*
+	 * 手动固定转速。
+	 * ★ 放在紧急温度/静默兜底【之后】—— 那两个是安全兜底,
+	 *   不能被"用户固定低速"越过(否则界面一个手滑就能把过热保护关掉)。
+	 */
+	if (st->cfg.mode == FAN_MODE_MANUAL && st->cfg.manual_speed >= 0) {
+		int v = st->cfg.manual_speed;
+
+		if (v < st->cfg.min_speed)
+			v = st->cfg.min_speed;
+		if (v > 100)
+			v = 100;
+		target = v;
+		reason = FAN_R_MANUAL;
+		goto force;
+	}
+
 	target = curve_eval(&st->curve, unified_temp);
 	reason = FAN_R_CURVE;
 	if (!curve_hyst_should_apply(&st->hyst, target, now_ms)) {

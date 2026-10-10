@@ -28,6 +28,14 @@ struct sms_msg {
 };
 
 /* 覆盖存储目录(测试用);NULL 恢复默认 /etc/openfi-sms */
+/*
+ * id 是否合法。
+ * ★ id 会被直接拼进文件路径,不校验的话 `delete ../../tmp/x`
+ *   就能删掉任意 *.json(`read` 也能把别的文件当短信读出来)。
+ *   我们生成的 id 只含字母数字和短横线,按这个白名单卡住。
+ */
+int sms_id_ok(const char *id);
+
 void sms_store_set_dir(const char *dir);
 const char *sms_store_dir(void);
 
@@ -55,6 +63,12 @@ int sms_store_mark(const char *id, int read);
  *   max  最多填几条
  * 返回实际条数(可能大于 max,用于分页提示)
  */
+/*
+ * 列出短信,新的在前。
+ * ★ 契约:out 必须至少有 SMS_STORE_MAX_LIST 项 —— 返回值是
+ *   【实际填入的条数】,不会超过 min(max, 库存, SMS_STORE_MAX_LIST)。
+ */
+#define SMS_STORE_MAX_LIST 512
 int sms_store_list(struct sms_msg *out, int max);
 
 /* 未读条数 */

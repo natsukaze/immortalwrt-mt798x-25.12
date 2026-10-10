@@ -41,6 +41,36 @@ static const char *resp_for(const char *cmd)
 		       "+QTEMP: \"pa-thermal\",47\r\nOK\r\n";
 	if (!strcmp(cmd, "AT+QNWINFO"))
 		return "+QNWINFO: \"NR5G-SA\",\"46000\",\"41\",\"504990\"\r\n\r\nOK\r\n";
+
+	/* ── 短信 ── */
+	if (!strcmp(cmd, "AT+CMGF=0") || !strcmp(cmd, "AT+CMGF=1"))
+		return "OK\r\n";
+	if (!strcmp(cmd, "AT+CSCA?"))
+		return "+CSCA: \"+8613800138000\",145\r\n\r\nOK\r\n";
+	if (!strcmp(cmd, "AT+CPMS?"))
+		return "+CPMS: \"SM\",3,50,\"SM\",3,50,\"SM\",3,50\r\n\r\nOK\r\n";
+	/*
+	 * AT+CMGL:三条短信 ——
+	 *   ① 7 位英文,已读
+	 *   ② UCS2 中文(带 UDH 的长短信第 1 段)
+	 *   ③ 8 位数据短信
+	 * 这些 PDU 都是按规范手算的,不是本代码编出来的 ——
+	 * 用"自己编自己解"当测试向量会掩盖位对齐之类的错误。
+	 */
+	if (!strncmp(cmd, "AT+CMGL", 7))
+		return "+CMGL: 1,\"REC READ\",\"+8613800138000\",,\"24/01/01,00:00:00+32\"\r\n"
+		       "0791683108108300F0040D91683108108300F000006210100000000005E8329BFD06\r\n"
+		       "+CMGL: 2,\"REC UNREAD\",\"+8613800138000\",,\"24/01/01,00:00:01+32\"\r\n"
+		       "0791683108108300F0440D91683108108300F00000621010000000000C0500032A0201D06536FB0D\r\n"
+		       "+CMGL: 3,\"REC UNREAD\",\"+8613800138000\",,\"24/01/01,00:00:02+32\"\r\n"
+		       "0791683108108300F0040D91683108108300F000046210100000000002AABB\r\n"
+		       "\r\nOK\r\n";
+	if (!strncmp(cmd, "AT+CMGD", 7))
+		return "OK\r\n";
+	if (!strncmp(cmd, "AT+CMGR", 7))
+		return "+CMGR: 0,,24\r\n"
+		       "0791683108108300F0040D91683108108300F000006210100000000005E8329BFD06\r\n"
+		       "\r\nOK\r\n";
 	/* 不认识的命令:真模组回 ERROR 或 CME ERROR */
 	return "ERROR\r\n";
 }
@@ -103,6 +133,16 @@ int main(int argc, char **argv)
 	/* 主循环:按行读命令,回显 + 应答 */
 	char line[512];
 	size_t used = 0;
+	/*
+	 * ★ 短信 PDU 的状态机。
+	 *   真模组的行为是:收到 AT+CMGS=<len> 后【不回 OK】,只回一个 "> " 提示,
+	 *   然后等我们把 PDU 写完,并用 Ctrl-Z(0x1A)表示输入结束,才回 OK。
+	 *   假模组必须照做 —— 否则测不出"漏发 Ctrl-Z"这类 bug
+	 *   (那正是真机上短信发不出去的原因)。
+	 */
+	int awaiting_pdu = 0;
+	char pdu[1024];
+	size_t pdu_used = 0;
 
 	for (;;) {
 		char c;
@@ -110,6 +150,40 @@ int main(int argc, char **argv)
 
 		if (n <= 0)
 			break;
+
+		if (awaiting_pdu) {
+			if (c == 0x1A) {		/* Ctrl-Z = 发送 */
+				pdu[pdu_used] = '\0';
+				if (verbose)
+					fprintf(stderr, "[fake-modem] 收到 PDU(%zu 字节): %s\n",
+						pdu_used, pdu);
+				/* 真机在这里还会校验 PDU 的十六进制合法性 */
+				{
+					int bad = (pdu_used == 0);
+
+					for (size_t i = 0; i < pdu_used; i++)
+						if (!isxdigit((unsigned char)pdu[i]))
+							bad = 1;
+					dprintf(master, "\r\n%s\r\n",
+						bad ? "+CMS ERROR: 304" : "+CMGS: 42\r\nOK");
+				}
+				awaiting_pdu = 0;
+				pdu_used = 0;
+				continue;
+			}
+			if (c == 0x1B) {		/* ESC = 放弃 */
+				dprintf(master, "\r\nERROR\r\n");
+				awaiting_pdu = 0;
+				pdu_used = 0;
+				continue;
+			}
+			if (c == '\r' || c == '\n')
+				continue;	/* PDU 内部的换行忽略 */
+			if (pdu_used < sizeof(pdu) - 1)
+				pdu[pdu_used++] = c;
+			continue;
+		}
+
 		if (c == '\r') {
 			line[used] = '\0';
 			used = 0;
@@ -119,6 +193,13 @@ int main(int argc, char **argv)
 				continue;
 			/* 真机开着回显:先原样回一行 */
 			dprintf(master, "%s\r\r\n", line);
+			if (!strncmp(line, "AT+CMGS=", 8)) {
+				/* 不回 OK,只给 "> " 提示 */
+				dprintf(master, "\r\n> ");
+				awaiting_pdu = 1;
+				pdu_used = 0;
+				continue;
+			}
 			dprintf(master, "%s", resp_for(line));
 			continue;
 		}

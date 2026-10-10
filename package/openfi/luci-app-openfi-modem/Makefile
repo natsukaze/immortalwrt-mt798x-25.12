@@ -39,7 +39,7 @@ endef
 define Build/Compile
 	$(MAKE) -C $(PKG_BUILD_DIR)/src \
 		CC="$(TARGET_CC)" \
-		CFLAGS="$(TARGET_CFLAGS)" \
+		CFLAGS="$(TARGET_CFLAGS) $(TARGET_CPPFLAGS) -I$(STAGING_DIR)/usr/include/openfi" \
 		LDFLAGS="$(TARGET_LDFLAGS)"
 endef
 
@@ -47,7 +47,7 @@ define Package/luci-app-openfi-modem/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/openfi-modem $(1)/usr/sbin/openfi-modem
 	$(CP) ./root/. $(1)/
-	$(CP) ./htdocs/. $(1)/www/ 2>/dev/null || true
+	$(CP) ./htdocs/. $(1)/www/
 endef
 
 $(eval $(call BuildPackage,luci-app-openfi-modem))

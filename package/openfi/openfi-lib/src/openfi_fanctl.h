@@ -20,7 +20,20 @@ struct fan_cfg {
 	int s1, s2, s3, s4;	/* 对应的转速 0..100 */
 	int min_speed;		/* 转速下限 */
 	int emergency_temp;	/* 到这个温度直接满转 */
+
+	/*
+	 * 手动模式。
+	 *   mode = FAN_MODE_AUTO   按温度曲线
+	 *   mode = FAN_MODE_MANUAL 固定 manual_speed
+	 * 优先级上紧急温度永远最高(安全),其次是物理静默档,
+	 * 然后才是手动 —— 免得用户"固定 0%"把过热保护也一起关掉。
+	 */
+	int mode;
+	int manual_speed;	/* 0..100;仅 mode=MANUAL 时生效 */
 };
+
+#define FAN_MODE_AUTO   0
+#define FAN_MODE_MANUAL 1
 
 /* 填一份默认配置(与旧版行为一致:55/58/61/65) */
 void fan_cfg_default(struct fan_cfg *cfg, int min_speed);

@@ -225,68 +225,233 @@ static int fetch_unread(const struct sms_cfg *c)
 
 /* ---------------- 发 ---------------- */
 
+/* UTF-8 字符长度;不完整或非法返回 0(让调用方停下,不要跨过结尾) */
+static int utf8_char_len(const unsigned char *p)
+{
+	int l;
+
+	if (!p || !*p)
+		return 0;
+	if (*p < 0x80)
+		l = 1;
+	else if ((*p & 0xE0) == 0xC0)
+		l = 2;
+	else if ((*p & 0xF0) == 0xE0)
+		l = 3;
+	else if ((*p & 0xF8) == 0xF0)
+		l = 4;
+	else
+		return 1;		/* 非法首字节,当单字节跳过 */
+	for (int i = 1; i < l; i++)
+		if (!p[i] || (p[i] & 0xC0) != 0x80)
+			return 0;	/* 不完整 —— 不能 q += l 跨过结尾 */
+	return l;
+}
+
+static int utf8_count(const char *text)
+{
+	const unsigned char *p = (const unsigned char *)text;
+	int n = 0;
+
+	while (p && *p) {
+		int l = utf8_char_len(p);
+
+		if (l <= 0)
+			break;
+		p += l;
+		n++;
+	}
+	return n;
+}
+
+/*
+ * 发一条 PDU。
+ *
+ * ★ 必须走这三步(以前直接 at_cmd 发 PDU,发送从来没成功过):
+ *     ① 发 AT+CMGS=<TPDU字节数>,模组回 ">" 提示(不是 OK)
+ *     ② 写 PDU 本体
+ *     ③ 用 Ctrl-Z(0x1A)结束 —— 只发 CR 的话模组会一直等剩余数据
+ *   然后才回 OK / ERROR。
+ */
+static int send_one_pdu(struct at_port *port, const struct sms_cfg *c,
+			const char *pdu, int tpdu_len)
+{
+	struct at_resp r;
+	char cmd[64];
+	char out[1024];
+	size_t used = 0;
+
+	snprintf(cmd, sizeof(cmd), "AT+CMGS=%d", tpdu_len);
+	if (at_write_raw(port, cmd, strlen(cmd)) != 0 ||
+	    at_write_raw(port, "\r", 1) != 0)
+		return -1;
+
+	/* 等 ">" 提示。有些模组会在提示前先吐回显,at_wait_prompt 只找 '>' */
+	if (at_wait_prompt(port, c->timeout_ms) != 0) {
+		olog_warn("等 > 提示超时,仍然尝试发 PDU");
+	}
+
+	if (at_write_raw(port, pdu, strlen(pdu)) != 0)
+		return -1;
+	/* ★ 0x1A = Ctrl-Z = "输入结束";0x1B(ESC)是放弃 */
+	if (at_write_raw(port, "\x1a", 1) != 0)
+		return -1;
+
+	/* 读结果 */
+	{
+		fd_set rfds;
+		struct timeval tv;
+		long long remain = c->timeout_ms * 3;
+
+		while (remain > 0) {
+			FD_ZERO(&rfds);
+			FD_SET(port->fd, &rfds);
+			tv.tv_sec = (time_t)(remain / 1000);
+			tv.tv_usec = (suseconds_t)((remain % 1000) * 1000);
+			int rc = select(port->fd + 1, &rfds, NULL, NULL, &tv);
+
+			if (rc < 0) {
+				if (errno == EINTR)
+					continue;
+				return -1;
+			}
+			if (rc == 0)
+				break;
+			{
+				ssize_t n = read(port->fd, out + used,
+						 sizeof(out) - used - 1);
+
+				if (n <= 0)
+					break;
+				used += (size_t)n;
+				out[used] = '\0';
+				if (strstr(out, "OK") || strstr(out, "ERROR") ||
+				    strstr(out, "+CMS ERROR") || strstr(out, "+CME ERROR"))
+					break;
+			}
+			remain -= 50;
+		}
+	}
+	if (at_parse(out, &r) != 0)
+		return -1;
+	return (r.result == AT_RES_OK) ? 0 : -1;
+}
+
 static int send_sms(const struct sms_cfg *c, const char *num, const char *text)
 {
 	struct at_port port;
 	struct at_resp r;
 	char pdu[SMS_HEX_MAX];
+	char chunk[SMS_TEXT_MAX];
 	struct sms_msg m;
-	int segs = sms_count_segments(text, 0);
-	int rc = 0;
+	int use_ucs2, nseg, per_seg, single_max;
+	int seg = 0, rc = 0;
+	int ref = (int)(time(NULL) & 0xFF);
+	const unsigned char *q = (const unsigned char *)text;
+	int chars_total;
 
+	if (!text || !*text)
+		return oj_fail("内容为空");
 	if (open_port(c, &port) != 0)
 		return oj_fail("打不开串口 %s", c->at_port);
 
-	/* 先设文本模式,免得模组把我们要发的 PDU 当命令解释 */
+	/* ── 先定编码:纯 GSM 7 位能表达就用 7 位,否则 UCS2 ── */
+	{
+		unsigned char tmp[SMS_HEX_MAX];
+		int sept = 0;
+
+		use_ucs2 = (sms_pack_7bit(text, tmp, sizeof(tmp), &sept) < 0);
+	}
+
+	/*
+	 * ★ 段数必须和实际切段用【同一套尺寸】,否则 UDH 里的 total
+	 *   和真实条数对不上,接收端要么丢掉 seq>total 的分片,
+	 *   要么永远等一条不存在的分段(整条短信不显示)。
+	 *   以前:段数用字节数按 153 估、切段却固定 67 —— 两者必然打架
+	 *   (实测 200 个 ASCII 字符:估算 2 段、实际切 3 段)。
+	 */
+	chars_total = utf8_count(text);
+	single_max = use_ucs2 ? 70 : 160;
+	per_seg = use_ucs2 ? 67 : 153;
+	nseg = (chars_total <= single_max) ? 1
+	     : (chars_total + per_seg - 1) / per_seg;
+
+	/* 按同一尺寸切段 */
+	int limit = (nseg > 1) ? per_seg : single_max;
+
+	/* 先切一遍并核对条数 —— 万一和估算不符,以实际为准 */
+	{
+		const unsigned char *p = q;
+		int n = 0;
+
+		while (*p) {
+			int chars = 0;
+
+			while (*p && chars < limit) {
+				int l = utf8_char_len(p);
+
+				if (l <= 0)
+					break;
+				p += l;
+				chars++;
+			}
+			if (chars == 0)
+				break;
+			n++;
+		}
+		if (n > 1 && n != nseg) {
+			olog_warn("段数估算 %d 与实际 %d 不符,按实际来", nseg, n);
+			nseg = n;
+		}
+	}
+
+	/* 设 PDU 模式 */
 	at_cmd(&port, "AT+CMGF=0", c->timeout_ms, &r);
 
-	int seg = 1;
-	int ref = (int)(time(NULL) & 0xFF);
-	const char *remain = text;
+	while (*q && rc == 0) {
+		int take = 0, chars = 0;
 
-	/* ★ 长短信按 67/153 个字符切段,每段带 UDH 参考号,收端才能拼起来 */
-	while (*remain && rc == 0) {
-		int maxchars = sms_count_segments(remain, 0) > 1 ? 67 : 1000;
-		char chunk[SMS_TEXT_MAX];
-		int take = 0;
+		while (*q && chars < limit) {
+			int l = utf8_char_len(q);
 
-		/* 按 UTF-8 字符数切(不能按字节切,否则中文会被切成半个字)*/
-		int chars = 0;
-		const unsigned char *q = (const unsigned char *)remain;
-
-		while (*q && chars < (segs > 1 ? 67 : 160)) {
-			int l = (*q < 0x80) ? 1 : ((*q & 0xE0) == 0xC0) ? 2 :
-				((*q & 0xF0) == 0xE0) ? 3 : 4;
-
-			for (int i = 0; i < l && q[i]; i++)
+			if (l <= 0) {
+				/* 不完整的 UTF-8:到此为止,不要把指针跨过结尾 */
+				olog_warn("正文末尾有不完整字符,已截断");
+				break;
+			}
+			if (take + l + 1 >= (int)sizeof(chunk))
+				break;
+			for (int i = 0; i < l; i++)
 				chunk[take++] = (char)q[i];
 			q += l;
 			chars++;
 		}
 		chunk[take] = '\0';
-		remain = (const char *)q;
-
-		char cmd[64];
-
-		if (sms_encode_pdu(c->sca, num, chunk, -1,
-				   segs > 1 ? segs : 0, segs > 1 ? seg : 0, ref,
-				   pdu, sizeof(pdu)) != 0) {
-			rc = oj_fail("PDU 编码失败");
+		if (chars == 0)
 			break;
-		}
 
-		snprintf(cmd, sizeof(cmd), "AT+CMGS=%d", (int)(strlen(pdu) / 2 - 1));
-		if (at_cmd(&port, cmd, c->timeout_ms, &r) != 0 ||
-		    !strstr(at_result_str(r.result), "OK")) {
-			/* 模组会用 "> " 提示要 PDU;这里不强求,直接发*/
-		}
-		if (at_cmd(&port, pdu, c->timeout_ms * 3, &r) != 0 ||
-		    r.result != AT_RES_OK) {
-			rc = oj_fail("发送失败:%s", at_result_str(r.result));
-			break;
-		}
 		seg++;
-		(void)maxchars;
+		if (sms_encode_pdu(c->sca, num, chunk, -1,
+				   nseg > 1 ? nseg : 0,
+				   nseg > 1 ? seg : 0, ref,
+				   pdu, sizeof(pdu)) != 0) {
+			rc = oj_fail("PDU 编码失败(第 %d 段)", seg);
+			break;
+		}
+		/* ★ 长度是 TPDU 字节数,不含短信中心字段 */
+		{
+			int tpdu = sms_tpdu_len(c->sca, pdu);
+
+			if (tpdu <= 0) {
+				rc = oj_fail("PDU 长度算不出来");
+				break;
+			}
+			if (send_one_pdu(&port, c, pdu, tpdu) != 0) {
+				rc = oj_fail("发送失败(第 %d/%d 段)", seg, nseg);
+				break;
+			}
+		}
+		olog_info("已发出第 %d/%d 段(%d 个字符)", seg, nseg, chars);
 	}
 
 	at_close(&port);
@@ -296,7 +461,7 @@ static int send_sms(const struct sms_cfg *c, const char *num, const char *text)
 		memset(&m, 0, sizeof(m));
 		copy_str(m.pdu.addr, sizeof(m.pdu.addr), num);
 		copy_str(m.pdu.text, sizeof(m.pdu.text), text);
-		m.pdu.dcs = SMS_DCS_UCS2;
+		m.pdu.dcs = use_ucs2 ? SMS_DCS_UCS2 : SMS_DCS_7BIT;
 		m.outgoing = 1;
 		m.read = 1;
 		m.received_at = (long)time(NULL);
@@ -306,7 +471,7 @@ static int send_sms(const struct sms_cfg *c, const char *num, const char *text)
 
 		oj_bool(o, "ok", 1);
 		oj_str(o, "to", num);
-		oj_int(o, "segments", segs);
+		oj_int(o, "segments", nseg);
 		oj_emit(o);
 	}
 	return rc;
@@ -375,47 +540,102 @@ int main(int argc, char **argv)
 	if (!strcmp(act, "list")) {
 		int max = (argc > 2) ? atoi(argv[2]) : 50;
 		static struct sms_msg all[512];
-		int total = sms_store_list(all, max > 0 ? max : 50);
-		struct ojson *o = oj_new();
-		int n = total < max ? total : max;
+		const int arr_max = (int)(sizeof(all) / sizeof(all[0]));
+		const size_t cap = 64 * 1024;
+		struct ojson *o;
+		char *arr;
+		size_t used = 0;
+		int total, n, i;
+		int truncated = 0;
 
-		/* 用一个 raw 数组把消息塞进去 */
+		/*
+		 * ★ 请求条数必须先收敛到【接收数组的上限】。
+		 *   sms_store_list 只会填 min(库存, max) 条,而这里传进来的是
+		 *   命令行参数 —— 库存 520 条 + `list 600` 就会往 512 项的数组里
+		 *   写 520 条,直接踩坏相邻内存。
+		 */
+		if (max <= 0)
+			max = 50;
+		if (max > arr_max)
+			max = arr_max;
+
+		total = sms_store_list(all, max);
+		n = (total < max) ? total : max;
+		if (n > arr_max)
+			n = arr_max;
+
+		o = oj_new();
+		arr = malloc(cap);
+		if (!arr) {
+			oj_free(o);
+			return 1;
+		}
+		arr[0] = '\0';
+
+		/*
+		 * ★ snprintf 返回的是"假如不截断会写多少字节",不是"实际写了多少"。
+		 *   所以不能写成 used += snprintf(arr+used, cap-used, ...) ——
+		 *   一旦总长超过 cap,cap-used 会下溢成一个巨大的 size_t,
+		 *   下一次 snprintf 就往分配区之外猛写(实测越界 287 字节)。
+		 *   正确做法:【先判后加】。
+		 */
+		{
+			int w = snprintf(arr + used, cap - used, "[");
+
+			if (w < 0 || (size_t)w >= cap - used) {
+				used = 0;
+				truncated = 1;
+			} else {
+				used += (size_t)w;
+			}
+		}
+
+		for (i = 0; i < n && !truncated; i++) {
+			struct ojson *one = oj_new();
+			char *js;
+
+			oj_str(one, "id", all[i].id);
+			oj_str(one, "addr", all[i].pdu.addr);
+			oj_str(one, "ts", all[i].pdu.ts);
+			oj_bool(one, "read", all[i].read);
+			oj_bool(one, "outgoing", all[i].outgoing);
+			oj_int(one, "received_at", all[i].received_at);
+			oj_str(one, "text", all[i].pdu.text);
+			js = oj_render(one);
+			oj_free(one);
+			if (!js)
+				continue;
+
+			int w = snprintf(arr + used, cap - used, "%s%s",
+					 i ? "," : "", js);
+
+			free(js);
+			if (w < 0 || (size_t)w >= cap - used) {
+				/* 放不下了 —— 把已经写好的部分收尾,别硬塞 */
+				truncated = 1;
+				n = i;
+				break;
+			}
+			used += (size_t)w;
+		}
+
+		if (truncated)
+			olog_warn("短信太多,列表被截断到 %d 条", n);
+		{
+			int w = snprintf(arr + used, cap - used, "]");
+
+			if (w < 0 || (size_t)w >= cap - used)
+				arr[used ? used - 1 : 0] = '\0';	/* 极端情况:去掉尾逗号 */
+			else
+				used += (size_t)w;
+		}
+
 		oj_int(o, "total", total);
 		oj_int(o, "unread", sms_store_unread());
-		{
-			char *arr = malloc(64 * 1024);
-			size_t used = 0;
-
-			if (!arr) {
-				oj_free(o);
-				return 1;
-			}
-			arr[0] = '\0';
-			used += (size_t)snprintf(arr + used, 64 * 1024 - used, "[");
-			for (int i = 0; i < n; i++) {
-				/* 每条的 JSON 单独渲染再拼 —— 避免嵌套 API 复杂化 */
-				struct ojson *one = oj_new();
-				char *js;
-
-				oj_str(one, "id", all[i].id);
-				oj_str(one, "addr", all[i].pdu.addr);
-				oj_str(one, "ts", all[i].pdu.ts);
-				oj_bool(one, "read", all[i].read);
-				oj_bool(one, "outgoing", all[i].outgoing);
-				oj_int(one, "received_at", all[i].received_at);
-				oj_str(one, "text", all[i].pdu.text);
-				js = oj_render(one);
-				oj_free(one);
-				if (js) {
-					used += (size_t)snprintf(arr + used, 64 * 1024 - used,
-								 "%s%s", i ? "," : "", js);
-					free(js);
-				}
-			}
-			snprintf(arr + used, 64 * 1024 - used, "]");
-			oj_raw(o, "messages", arr);
-			free(arr);
-		}
+		oj_int(o, "shown", n);
+		oj_bool(o, "truncated", truncated);
+		oj_raw(o, "messages", arr);
+		free(arr);
 		oj_emit(o);
 		return 0;
 	}
@@ -425,6 +645,8 @@ int main(int argc, char **argv)
 
 		if (argc < 3)
 			return oj_fail("要指定 id");
+		if (!sms_id_ok(argv[2]))
+			return oj_fail("id 不合法");
 		if (sms_store_get(argv[2], &m) != 0)
 			return oj_fail("找不到这条短信");
 		emit_msg_json(&m, 1);

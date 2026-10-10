@@ -43,6 +43,15 @@ int at_cmd(struct at_port *p, const char *cmd, int timeout_ms, struct at_resp *r
  */
 int at_write_raw(struct at_port *p, const char *data, size_t len);
 
+/*
+ * 等模组吐出 ">" 输入提示(短信 PDU 要用)。
+ * ★ 发短信必须走这条路:AT+CMGS=<len> 之后模组不会回 OK,而是回 "> ",
+ *   等我们把 PDU 写完再用 Ctrl-Z(0x1A)结束。以前直接用 at_cmd 发 PDU,
+ *   既等不到 ">"、又用 CR 当结束符 —— 模组一直等剩余数据,发送必然失败。
+ * 成功 0,超时 -1。
+ */
+int at_wait_prompt(struct at_port *p, int timeout_ms);
+
 /* 列出系统里像"模组的 AT 口"的设备:返回逗号分隔的 /dev/ttyUSB* /dev/ttyACM* */
 int at_list_ports(char *out, size_t outlen);
 

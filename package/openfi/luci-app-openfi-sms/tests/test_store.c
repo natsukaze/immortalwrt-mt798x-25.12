@@ -89,7 +89,14 @@ int main(void)
 
 	printf("── 分页(max 小于总数)──\n");
 	n = sms_store_list(out, 1);
-	T_EQ_INT(n, 2);                    /* 总数照实报 */
+	/*
+	 * ★ 返回值语义:【实际填入 out 的条数】,不是库存总数。
+	 *   原先返回总数看着更"友好",但它逼着函数往调用方数组里塞
+	 *   min(total, max) 条 —— 库存 520 条 + list 600 就直接越界写。
+	 *   要总数请用 sms_store_count()(它独立数目录,不借道这里)。
+	 */
+	T_EQ_INT(n, 1);
+	T_EQ_INT(sms_store_count(), 2);
 	T_EQ_STR(out[0].pdu.text, "第二条");
 
 	printf("── 删除 ──\n");

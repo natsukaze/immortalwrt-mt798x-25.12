@@ -71,10 +71,33 @@ int sms_encode_addr(const char *num, unsigned char *out, size_t outlen, int with
 
 /* ---- 文本 ---- */
 
-/* 7bit 解包:n 个字符 → UTF-8。返回写出的字符数 */
+/*
+ * 7bit 打包 / 解包。
+ *
+ * ★ 为什么要"起始 septet"参数:
+ *   带 UDH(长短信头)时,UDH 占的字节数【未必落在 septet 边界上】——
+ *   规范(GSM 03.40 §9.2.3.24)要求在其后补若干填充位,让正文从
+ *   septet 边界开始。6 字节 UDH = 48 bit,48%7=6,所以要补 1 位,
+ *   正文从第 7 个 septet 开始。
+ *   如果按"字节对齐"去摆正文(把指针指到 UDH 后面那个字节),
+ *   就会整体错 1 位 —— 收到的长英文短信全乱码,发出去的对方也读不了。
+ *   这个偏移不是靠"自己编自己解"能发现的,必须对着规范向量测。
+ */
+int sms_unpack_7bit_at(const unsigned char *in, int start_sept, int septets,
+		       char *out, size_t outlen);
+int sms_pack_7bit_at(const char *text, int start_sept, unsigned char *out,
+		     size_t outlen, int *septets_out);
+
+/* 从第 0 个 septet 开始的简写(无 UDH 时用) */
 int sms_unpack_7bit(const unsigned char *in, int septets, char *out, size_t outlen);
-/* 7bit 打包:UTF-8/ASCII → 字节。返回写出的字节数 */
 int sms_pack_7bit(const char *text, unsigned char *out, size_t outlen, int *septets_out);
+
+/*
+ * 算 UDH 占多少个 septet(含规范要求的填充位)。
+ *   返回 (udh_len+1)*8 补到 septet 边界后除以 7。
+ *   udh_len 传 UDHL 的值(UDH 数据字节数,不含 UDHL 自己)。
+ */
+int sms_udh_septets(int udh_len);
 
 /* UCS2(UTF-16BE)解成 UTF-8 */
 int sms_ucs2_to_utf8(const unsigned char *in, int nbytes, char *out, size_t outlen);
@@ -103,7 +126,21 @@ int sms_encode_pdu(const char *sca, const char *addr, const char *text, int dcs,
 		   int concat_total, int concat_seq, int concat_ref,
 		   char *out, size_t outlen);
 
-/* 按 7bit / UCS2 估算一条短信要占多少"条"(用于界面提示)*/
+/*
+ * 估算一条短信要占多少"条"。
+ *   use_ucs2 < 0 表示自动判断(试 7 位能否编码)
+ * 注意:7 位编码时按【字符数(septet)】算,不能用 strlen ——
+ * GSM 默认表里 ¤ ¡ Δ 这些是多字节 UTF-8,但各只占一个 septet,
+ * 用字节数会高估段数(实测把 1 段的中文当成 3 段)。
+ */
 int sms_count_segments(const char *text, int use_ucs2);
+
+/*
+ * 算 PDU 里 TPDU 部分的字节数 —— AT+CMGS=<len> 要填的就是它。
+ * ★ 这个长度【不含开头的短信中心字段】(长度字节 + 类型字节 + 数字字节)。
+ *   以前我图省事写 "总字节数 - 1",那只在短信中心为空(单个 0x00)时才对;
+ *   一旦配上短信中心号就多算 8 个字节,模组会一直等剩下的数据,发送必失败。
+ */
+int sms_tpdu_len(const char *sca, const char *pdu_hex);
 
 #endif

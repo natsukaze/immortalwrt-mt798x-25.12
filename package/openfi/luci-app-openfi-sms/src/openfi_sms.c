@@ -200,6 +200,15 @@ int sms_encode_addr(const char *num, unsigned char *out, size_t outlen, int with
 		ndig++;
 	if (ndig == 0)
 		return -1;
+	/*
+	 * ★ PDU 的地址长度字段只有一个字节,最多 255 位;
+	 *   现实里的号码不会超过 20 位。
+	 *   不限长的话,超长"号码"会把调用方的缓冲区写穿 ——
+	 *   实测 2033 位时 sizeof(buf)-n 下溢成 SIZE_MAX,
+	 *   紧接着的 memset 直接段错误(号码来自命令行/LuCI 输入框,零校验)。
+	 */
+	if (ndig > 20)
+		return -1;
 
 	for (int i = 0; i < ndig; i += 2) {
 		int lo = d[i] - '0';
@@ -217,15 +226,32 @@ int sms_encode_addr(const char *num, unsigned char *out, size_t outlen, int with
 
 /* ---- 7bit 打包/解包 ---- */
 
-int sms_unpack_7bit(const unsigned char *in, int septets, char *out, size_t outlen)
+int sms_udh_septets(int udh_len)
+{
+	int bits, fill;
+
+	if (udh_len < 0)
+		return 0;
+	bits = (udh_len + 1) * 8;		/* UDH 连同它自己的长度字节 */
+	fill = (7 - (bits % 7)) % 7;		/* 补到 septet 边界需要的填充位 */
+	return (bits + fill) / 7;
+}
+
+int sms_unpack_7bit_at(const unsigned char *in, int start_sept, int septets,
+		       char *out, size_t outlen)
 {
 	int oi = 0;
 
-	if (!in || !out || outlen < 2)
+	if (!in || !out || outlen < 2 || start_sept < 0)
 		return -1;
 	gsm7_ext_init();
+
+	/*
+	 * ★ 每个字符从第 (start_sept + i) * 7 位开始取 7 位。
+	 *   不能再按字节对齐 —— UDH 之后的位偏移未必是 8 的倍数。
+	 */
 	for (int i = 0; i < septets && oi + 4 < (int)outlen; i++) {
-		int bitpos = i * 7;
+		int bitpos = (start_sept + i) * 7;
 		int bi = bitpos / 8;
 		int bo = bitpos % 8;
 		int v = in[bi] >> bo;
@@ -235,9 +261,12 @@ int sms_unpack_7bit(const unsigned char *in, int septets, char *out, size_t outl
 		v &= 0x7F;
 
 		if (v == 0x1B) {
-			/* 扩展表:下一个 septet 是扩展字符 */
+			/* 扩展表:下一个 septet 是扩展字符。
+			   注意别越界 —— 末尾孤立的 0x1B 直接丢弃。 */
+			if (i + 1 >= septets)
+				break;
 			i++;
-			int bp2 = i * 7, bi2 = bp2 / 8, bo2 = bp2 % 8;
+			int bp2 = (start_sept + i) * 7, bi2 = bp2 / 8, bo2 = bp2 % 8;
 			int w = in[bi2] >> bo2;
 
 			if (bo2 > 1)
@@ -266,22 +295,34 @@ int sms_unpack_7bit(const unsigned char *in, int septets, char *out, size_t outl
 	return oi;
 }
 
-int sms_pack_7bit(const char *text, unsigned char *out, size_t outlen, int *septets_out)
+int sms_unpack_7bit(const unsigned char *in, int septets, char *out, size_t outlen)
 {
-	int septets = 0;
+	return sms_unpack_7bit_at(in, 0, septets, out, outlen);
+}
+
+/* 往第 septet 个 septet 位置写一个 7 位值(可跨字节) */
+static void put_septet(unsigned char *out, size_t outlen, int septet, int code)
+{
+	int bp = septet * 7, bi = bp / 8, bo = bp % 8;
+
+	if ((size_t)bi + 1 >= outlen)
+		return;
+	out[bi] |= (unsigned char)(code << bo);
+	if (bo > 1)
+		out[bi + 1] |= (unsigned char)(code >> (8 - bo));
+}
+
+int sms_pack_7bit_at(const char *text, int start_sept, unsigned char *out,
+		     size_t outlen, int *septets_out)
+{
+	int septets = start_sept;
 	const char *t = text;
 
-	if (!text || !out)
+	if (!text || !out || start_sept < 0)
 		return -1;
 	gsm7_ext_init();
 	memset(out, 0, outlen);
 
-	/*
-	 * ★ 按【UTF-8 字符】一个一个处理,不能按字节。
-	 *   因为 GSM 默认表里有 ¤ ¡ Ä £ è 这类非 ASCII 字符,它们在 UTF-8 里
-	 *   是两三个字节 —— 只比第一个字节永远匹配不上(这是我第一版的 bug)。
-	 *   做法:拿表里的每一项去和输入当前位置做前缀比较,匹配就整段跳过。
-	 */
 	while (*t) {
 		int code = -1, is_ext = 0;
 		size_t adv = 1;
@@ -314,34 +355,24 @@ int sms_pack_7bit(const char *text, unsigned char *out, size_t outlen, int *sept
 			}
 		}
 		if (code < 0)
-			return -1;		/* 这个字符 7 位表里没有(该走 UCS2)*/
+			return -1;		/* 7 位表里没有,该走 UCS2 */
 
 		if (is_ext) {
-			/* 先写 0x1B 转义,再写字符本身 */
-			int bp = septets * 7, bi = bp / 8, bo = bp % 8;
-
-			if ((size_t)bi + 1 >= outlen)
-				return -1;
-			out[bi] |= (unsigned char)(0x1B << bo);
-			if (bo > 1)
-				out[bi + 1] |= (unsigned char)(0x1B >> (8 - bo));
+			put_septet(out, outlen, septets, 0x1B);
 			septets++;
 		}
-		{
-			int bp = septets * 7, bi = bp / 8, bo = bp % 8;
-
-			if ((size_t)bi + 1 >= outlen)
-				return -1;
-			out[bi] |= (unsigned char)(code << bo);
-			if (bo > 1)
-				out[bi + 1] |= (unsigned char)(code >> (8 - bo));
-			septets++;
-		}
+		put_septet(out, outlen, septets, code);
+		septets++;
 		t += adv;
 	}
 	if (septets_out)
-		*septets_out = septets;
+		*septets_out = septets;		/* 含起始偏移,调用方直接拿它当 UDL */
 	return (septets * 7 + 7) / 8;
+}
+
+int sms_pack_7bit(const char *text, unsigned char *out, size_t outlen, int *septets_out)
+{
+	return sms_pack_7bit_at(text, 0, out, outlen, septets_out);
 }
 
 /* ---- UCS2 ---- */
@@ -564,20 +595,40 @@ int sms_decode_pdu(const char *hex, struct sms *s)
 		return -1;
 	int udl = b[i++];
 	ud_start = i;
-	if (dcs == SMS_DCS_7BIT)
-		udlen = (udl * 7 + 7) / 8;	/* 换算成字节数,供越界检查 */
-	else
-		udlen = udl;
+	udlen = (dcs == SMS_DCS_7BIT) ? (udl * 7 + 7) / 8 : udl;
+
+	/*
+	 * ★ UDL 声明的长度超过了实际收到的字节数 —— 报文被截断(或对方乱发)。
+	 *   以前这里是"夹到可用长度然后继续",于是半截短信被当成完整短信
+	 *   存进库里,调用方完全不知道(实测:去掉最后一字节,解出 "hell"
+	 *   并且 valid=1)。宁可返回错误让上层丢弃。
+	 */
 	if (ud_start + udlen > n)
-		udlen = n - ud_start;
+		return -1;
 
 	/* ⑥ UDH(长短信拼接信息)*/
-	if (has_udh && udlen > 1) {
+	int udh_bytes = 0;		/* UDH 连同它自己的长度字节所占的字节数 */
+
+	if (has_udh) {
+		if (udlen < 1)
+			return -1;
 		udh_len = b[ud_start];
-		if (udh_len + 1 <= udlen) {
+		udh_bytes = udh_len + 1;
+
+		/*
+		 * ★ UDHL 声称自己比整个 UD 还长 —— 这是畸形报文。
+		 *   以前校验失败后 udh_len 仍留着原值:正文指针被推到数据之外,
+		 *   而 (udlen - udh_len) 是负数,转成 size_t 会变成天文数字,
+		 *   于是从栈上读出几百字节当成短信正文。
+		 *   【远程可触发】—— 任何人发一条构造的短信就行(UDHI + 8bit DCS
+		 *   都是合法字段)。必须在这里直接拒绝。
+		 */
+		if (udh_bytes > udlen)
+			return -1;
+		{
 			const unsigned char *u = b + ud_start + 1;
 
-			/* 00 03 <ref> <total> <seq>  —— 8 位参考号 */
+			/* 00 03 <ref> <total> <seq> —— 8 位参考号 */
 			if (udh_len >= 5 && u[0] == 0x00 && u[1] == 0x03) {
 				s->concat_ref = u[2];
 				s->concat_total = u[3];
@@ -592,43 +643,38 @@ int sms_decode_pdu(const char *hex, struct sms *s)
 	}
 
 	/*
-	 * ⑦ 正文起点。
-	 * ★ UDH 的第一个字节是 UDHL(它自己之后还有多少字节),
-	 *   所以整段 UDH 占 udh_len + 1 个字节 —— 正文从【再下一个字节】开始。
-	 *   少加这个 1,正文就整体前移一字节,中文(UCS2)会解成乱码。
+	 * ⑦ 正文。
+	 * ★ 带 UDH 时,长度要减掉【UDH 连同它自己的长度字节】——
+	 *   少减这 1 个字节,UCS2/8bit 会把 UD 字段之后的那个字节也当正文
+	 *   (真实场景里那是栈上的未初始化数据,等于把内存内容当短信发出去)。
 	 */
-	const unsigned char *ud = b + ud_start + (udh_len ? udh_len + 1 : 0);
+	int body = udlen - udh_bytes;
+
+	if (body < 0)
+		return -1;
 
 	if (dcs == SMS_DCS_UCS2) {
-		sms_ucs2_to_utf8(ud, udlen - udh_len, s->text, sizeof(s->text));
+		sms_ucs2_to_utf8(b + ud_start + udh_bytes, body, s->text, sizeof(s->text));
 	} else if (dcs == SMS_DCS_7BIT) {
 		/*
-		 * ★ 7 位正文的字符数【直接就是 UDL】,不要拿字节数去反推 ——
-		 *   反推会把末尾填充位算成一个字符。
-		 *   带 UDH 时,UDH(含它自己的长度字节)也按 septet 占位,
-		 *   并且要补一个填充位让正文落在字节边界上,
-		 *   所以 UDH 折算成 ceil((udh_len+1)*8/7) 个 septet,从 UDL 里扣掉。
+		 * ★ 7 位正文的起点必须按【septet】算,不能按字节算。
+		 *   UDH 占 (udh_len+1)*8 位,规范(GSM 03.40 §9.2.3.24)要求
+		 *   在其后补填充位,让正文从 septet 边界开始:
+		 *       6 字节 UDH = 48 位,48 % 7 = 6 → 补 1 位 → 正文从第 7 个 septet
+		 *   按字节对齐(从第 48 位)会整体错 1 位 ——
+		 *   收到的长英文短信全乱码,发出去的对方也读不成。
+		 *   这个错误"自己编自己解"发现不了(两边同错),必须对着规范向量测。
 		 */
-		int sept = udl;
+		int start_sept = has_udh ? sms_udh_septets(udh_len) : 0;
+		int sept = udl - start_sept;
 
-		if (udh_len) {
-			int udh_sept = ((udh_len + 1) * 8 + 6) / 7;
-
-			sept -= udh_sept;
-			if (sept < 0)
-				sept = 0;
-		}
-		/* 再按实际可读字节数兜一次上限,防止越界 */
-		{
-			int cap = udlen * 8 / 7;
-
-			if (sept > cap)
-				sept = cap;
-		}
-		sms_unpack_7bit(ud, sept, s->text, sizeof(s->text));
+		if (sept < 0)
+			sept = 0;
+		sms_unpack_7bit_at(b + ud_start, start_sept, sept,
+				   s->text, sizeof(s->text));
 	} else {
-		/* 8 位数据:当二进制处理,转成可见的十六进制 */
-		sms_bytes2hex(ud, (size_t)(udlen - udh_len), s->text, sizeof(s->text));
+		sms_bytes2hex(b + ud_start + udh_bytes, (size_t)body,
+			      s->text, sizeof(s->text));
 	}
 
 	s->valid = 1;
@@ -702,45 +748,77 @@ int sms_encode_pdu(const char *sca, const char *addr, const char *text, int dcs,
 
 	/* ⑦ 用户数据长度 + 内容 */
 	int udl_pos = n;
+	int ud_pos;
 
-	n++;					/* 先占位 */
-
-	/* UDH */
-	if (concat_total > 1) {
-		unsigned char *u = b + n;
-
-		u[0] = 0x05;			/* UDHL */
-		u[1] = 0x00;
-		u[2] = 0x03;
-		u[3] = (unsigned char)(concat_ref & 0xFF);
-		u[4] = (unsigned char)concat_total;
-		u[5] = (unsigned char)concat_seq;
-		udh_bytes = 6;
-		n += udh_bytes;
-		b[fo_pos] |= 0x40;		/* UDHI */
-	}
+	n++;					/* UDL 先占位 */
+	if ((size_t)n + 8 > sizeof(b))
+		return -1;
 
 	if (use_ucs2) {
-		int r = sms_utf8_to_ucs2(text, b + n, sizeof(b) - (size_t)n);
+		/* UCS2 按字节对齐,UDH 直接放在正文前面即可 */
+		ud_pos = n;
+		if (concat_total > 1) {
+			unsigned char *u = b + n;
 
-		if (r < 0)
+			u[0] = 0x05;			/* UDHL */
+			u[1] = 0x00;
+			u[2] = 0x03;
+			u[3] = (unsigned char)(concat_ref & 0xFF);
+			u[4] = (unsigned char)concat_total;
+			u[5] = (unsigned char)concat_seq;
+			udh_bytes = 6;
+			n += udh_bytes;
+			b[fo_pos] |= 0x40;		/* UDHI */
+		}
+		if ((size_t)n >= sizeof(b))
 			return -1;
-		n += r;
-		/* UDL 是字节数 */
-		b[udl_pos] = (unsigned char)(n - udl_pos - 1);
+		{
+			int r = sms_utf8_to_ucs2(text, b + n, sizeof(b) - (size_t)n);
+
+			if (r < 0)
+				return -1;
+			n += r;
+		}
+		b[udl_pos] = (unsigned char)(n - ud_pos);	/* UDL = 字节数 */
 	} else {
-		int sept = 0;
-		int r = sms_pack_7bit(text, b + n, sizeof(b) - (size_t)n, &sept);
+		/*
+		 * ★ 7 位 + UDH:正文【不能】从字节边界开始。
+		 *   UDH 占 (udh_len+1) 字节,规范(GSM 03.40 §9.2.3.24)要求
+		 *   在其后补填充位,让正文落在 septet 边界上:
+		 *       6 字节 UDH = 48 位,48 % 7 = 6 → 补 1 位 → 正文从第 7 个 septet
+		 *
+		 *   做法:让 pack 带"起始 septet"偏移直接打进临时缓冲
+		 *   (偏移之前的位保持 0),再把 UDH 覆盖到开头几个字节 ——
+		 *   这样位拼接交给已经在做这件事的函数,不用在这里重写一遍。
+		 */
+		unsigned char tmp[SMS_HEX_MAX / 2];
+		int start_sept = 0, total_sept = 0, r;
 
+		if (concat_total > 1) {
+			/* 我们用 8 位参考号的 UDH:UDHL=5,整段 6 字节 */
+			udh_bytes = 6;
+			start_sept = sms_udh_septets(5);	/* 48 位 → 补 1 位 → 7 个 septet */
+			b[fo_pos] |= 0x40;
+		}
+		r = sms_pack_7bit_at(text, start_sept, tmp, sizeof(tmp), &total_sept);
 		if (r < 0)
 			return -1;
+
+		if (concat_total > 1) {
+			tmp[0] = 0x05;
+			tmp[1] = 0x00;
+			tmp[2] = 0x03;
+			tmp[3] = (unsigned char)(concat_ref & 0xFF);
+			tmp[4] = (unsigned char)concat_total;
+			tmp[5] = (unsigned char)concat_seq;
+		}
+		if ((size_t)r > sizeof(b) - (size_t)n)
+			return -1;
+		ud_pos = n;
+		memcpy(b + n, tmp, (size_t)r);
 		n += r;
-		/*
-		 * ★ 7 位编码时 UDL 记的是【字符数】,不是字节数。
-		 *   带 UDH 时还要把 UDH 折算成 septet 加进去
-		 *   (UDH 按 7 位算并补一个填充位,所以是 (udh_bytes*8+6)/7)。
-		 */
-		b[udl_pos] = (unsigned char)(sept + (udh_bytes ? (udh_bytes * 8 + 6) / 7 : 0));
+		/* pack 回填的 septet 数已含起始偏移,直接就是 UDL */
+		b[udl_pos] = (unsigned char)total_sept;
 	}
 
 	sms_bytes2hex(b, (size_t)n, out, outlen);
@@ -751,6 +829,15 @@ int sms_count_segments(const char *text, int use_ucs2)
 {
 	if (!text)
 		return 0;
+
+	/* use_ucs2 < 0:自动判断 —— 试 7 位能不能编进去 */
+	if (use_ucs2 < 0) {
+		unsigned char tmp[512];
+		int sept = 0;
+
+		use_ucs2 = (sms_pack_7bit(text, tmp, sizeof(tmp), &sept) < 0);
+	}
+
 	if (use_ucs2) {
 		/* UCS2:单条 70 字符,长短信每条 67 字符(UDH 占 6 字节 = 3 字符)*/
 		size_t chars = 0;
@@ -767,10 +854,42 @@ int sms_count_segments(const char *text, int use_ucs2)
 			return 1;
 		return (int)((chars + 66) / 67);
 	} else {
-		size_t n = strlen(text);
+		/*
+		 * ★ 7 位:用【septet 数】而不是字节数。
+		 *   GSM 默认表里 ¤ ¡ Ä 这些是 2 字节 UTF-8,但只占 1 个 septet;
+		 *   用 strlen 会把段数算多(130 个中文字按字节算是 390 → 3 段,
+		 *   实际 UCS2 只要 2 段;纯 ASCII 里混一个 ¤ 也会算错)。
+		 */
+		unsigned char tmp[SMS_HEX_MAX];
+		int sept = 0;
 
-		if (n <= 160)
+		if (sms_pack_7bit(text, tmp, sizeof(tmp), &sept) < 0) {
+			/* 编不进去说明得走 UCS2,回到上面的算法 */
+			return sms_count_segments(text, 1);
+		}
+		if (sept <= 160)
 			return 1;
-		return (int)((n + 152) / 153);
+		return (sept + 152) / 153;
 	}
+}
+
+int sms_tpdu_len(const char *sca, const char *pdu_hex)
+{
+	int total, smsc;
+
+	if (!pdu_hex)
+		return -1;
+	total = (int)(strlen(pdu_hex) / 2);	/* PDU 总字节数 */
+
+	if (!sca || !*sca) {
+		smsc = 1;			/* 只有长度字节 0x00 */
+	} else {
+		int digits = 0;
+
+		for (const char *p = sca; *p; p++)
+			if (p[0] >= '0' && p[0] <= '9')
+				digits++;
+		smsc = 2 + (digits + 1) / 2;	/* 长度字节 + 类型字节 + 数字字节 */
+	}
+	return total - smsc;
 }

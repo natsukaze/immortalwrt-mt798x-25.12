@@ -41,6 +41,10 @@ on:
     paths:
       - 'defconfig/**'
       - 'feeds.conf.default'
+      # ★ 我们自己的包和检查脚本也要能触发构建 ——
+      #   少了这两条,改了包推上去什么都不会发生(以为在编,其实没跑)。
+      - 'package/openfi/**'
+      - 'scripts/openfi/**'
       - 'target/linux/mediatek/dts/mt7981b-openfi-6c.dts'
       - 'target/linux/mediatek/image/filogic.mk'
       - '.github/workflows/build.yml'

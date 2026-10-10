@@ -74,7 +74,7 @@ int osys_write(const char *path, const char *val)
 	int fd;
 	ssize_t n;
 	char buf[256];
-	size_t len;
+	int len;			/* snprintf 的返回值,可能为负 —— 不能用 size_t */
 
 	osys_path(full, sizeof(full), path);
 	/*
@@ -90,8 +90,19 @@ int osys_write(const char *path, const char *val)
 	fd = open(full, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (fd < 0)
 		return -1;
+	/*
+	 * ★ snprintf 返回的是"假如不截断会写多少字节",不是"实际写了多少"。
+	 *   值太长时它会返回一个【大于缓冲区】的数,直接拿它当长度去 write(),
+	 *   就会从 buf 后面多读一截栈内存(栈越界读)。返回负值(编码出错)时更糟:
+	 *   赋给 size_t 会变成一个巨大的数。
+	 *
+	 *   而且被截断的值本来也不该写进 sysfs —— 比如 40000 截成 4000,
+	 *   会把 PWM 周期悄悄改错。与其写错,不如直接拒绝。
+	 */
 	len = snprintf(buf, sizeof(buf), "%s\n", val);
-	n = write(fd, buf, len);
+	if (len < 0 || (size_t)len >= sizeof(buf))
+		return close(fd), -1;
+	n = write(fd, buf, (size_t)len);
 	close(fd);
 	return (n == (ssize_t)len) ? 0 : -1;
 }

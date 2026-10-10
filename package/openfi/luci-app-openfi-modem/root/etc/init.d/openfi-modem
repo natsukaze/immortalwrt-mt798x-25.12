@@ -1,4 +1,5 @@
 #!/bin/sh /etc/rc.common
+# shellcheck disable=SC2034  # START/STOP/USE_PROCD 由 /etc/rc.common 读取
 #
 # OpenFi 6C 模组采样服务
 #

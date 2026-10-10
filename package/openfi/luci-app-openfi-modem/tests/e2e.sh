@@ -107,23 +107,19 @@ check temp_soc  54
 check temp_pa   47
 
 echo "── 缓存文件与温度文件(风扇靠这个温度)──"
-[ -f "$R/var/run/openfi-modem.json" ] && ok "状态缓存已写入" || bad "状态缓存没写"
+if [ -f "$R/var/run/openfi-modem.json" ]; then ok "状态缓存已写入"; else bad "状态缓存没写"; fi
 T=$(cat "$R/var/run/openfi-modem-temp" 2>/dev/null)
-[ "$T" = "54" ] && ok "风扇要的模组温度 = 54" || bad "温度文件不对: '$T'"
+if [ "$T" = "54" ]; then ok "风扇要的模组温度 = 54"; else bad "温度文件不对: '$T'"; fi
 
 echo "── status:读缓存(零副作用)──"
 OUT2=$("$BIN" status 2>/dev/null)
 if json_ok "$OUT2"; then ok "status 输出合法 JSON"; else bad "status 输出不合法"; fi
 check2=$(jget model "$OUT2")
-[ "$check2" = "RM500U-CN" ] && ok "status 读到的型号正确" || bad "status 型号: $check2"
+if [ "$check2" = "RM500U-CN" ]; then ok "status 读到的型号正确"; else bad "status 型号: $check2"; fi
 
 echo "── at:透传一条命令 ──"
 A=$("$BIN" at "AT+CGSN" 2>/dev/null)
 case "$A" in *012345678901234*) ok "at 透传拿回了 IMEI" ;; *) bad "at 输出: $A" ;; esac
-
-echo "── sim 没插卡的情况 ──"
-# 用另一个假模组应答"没插卡"
-if command -v python3 >/dev/null 2>&1; then :; fi
 
 echo
 echo "  通过 $PASS 项,失败 $FAIL 项"

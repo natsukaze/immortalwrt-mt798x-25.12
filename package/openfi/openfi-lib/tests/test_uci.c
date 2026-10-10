@@ -47,11 +47,12 @@ int main(void)
 	write_file("openfi_nosec", "config solo\n\toption x '1'\n");
 
 	printf("── 基本读取 ──\n");
-	T_EQ_STR(ouci_get("openfi_fan", "fan", "mode"), "auto");
-	T_EQ_STR(ouci_get("openfi_fan", "fan", "temp1"), "55");     /* 无引号也能读 */
-	T_EQ_STR(ouci_get("openfi_fan", "fan", "min_speed"), "7");  /* 首尾空白被去掉 */
+	T_EQ_STR_FREE(ouci_get("openfi_fan", "fan", "mode"), "auto");
+	T_EQ_STR_FREE(ouci_get("openfi_fan", "fan", "temp1"), "55");     /* 无引号也能读 */
+	T_EQ_STR_FREE(ouci_get("openfi_fan", "fan", "min_speed"), "7");  /* 首尾空白被去掉 */
 
 	printf("── 不存在的情况 ──\n");
+	/* 这三处期望的就是 NULL,没有内存要释放 */
 	T_OK(ouci_get("openfi_fan", "fan", "nope") == NULL);
 	T_OK(ouci_get("openfi_fan", "nope", "mode") == NULL);
 	T_OK(ouci_get("no_such_pkg", "fan", "mode") == NULL);
@@ -71,12 +72,12 @@ int main(void)
 	T_EQ_INT(ouci_get_bool("openfi_fan", "fan", "mode", 7), 7);    /* 非布尔→默认 */
 
 	printf("── 空值 / 匿名段 ──\n");
-	T_EQ_STR(ouci_get("openfi_fan", "fan", "empty"), "");
-	T_EQ_STR(ouci_get("openfi_nosec", "", "x"), "1");
+	T_EQ_STR_FREE(ouci_get("openfi_fan", "fan", "empty"), "");
+	T_EQ_STR_FREE(ouci_get("openfi_nosec", "", "x"), "1");
 
 	printf("── 同名字段分属不同 section 不能串 ──\n");
-	T_EQ_STR(ouci_get("openfi_fan", "fan", "enabled"), "on");
-	T_EQ_STR(ouci_get("openfi_fan", "led", "enabled"), "0");
+	T_EQ_STR_FREE(ouci_get("openfi_fan", "fan", "enabled"), "on");
+	T_EQ_STR_FREE(ouci_get("openfi_fan", "led", "enabled"), "0");
 
 	printf("── 列选项 ──\n");
 	{
@@ -94,7 +95,10 @@ int main(void)
 		FILE *f;
 		snprintf(path, sizeof(path), "%s/openfi_test", DIR);
 		f = fopen(path, "w"); fputs("config t 't'\n\toption a 'x'\n", f); fclose(f);
-		T_OK(ouci_get("openfi_test", "t", "a") != NULL);
+		char *v = ouci_get("openfi_test", "t", "a");
+
+		T_OK(v != NULL);
+		free(v);
 	}
 
 	T_SUMMARY();

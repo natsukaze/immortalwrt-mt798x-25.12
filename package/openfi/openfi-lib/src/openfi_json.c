@@ -11,29 +11,51 @@ struct ojson {
 	size_t len;
 	size_t cap;
 	int n;			/* 已写入的字段数 */
+	int oom;		/* 扩容失败过 —— 之后一律不再写,避免越界 */
 };
 
-static void reserve(struct ojson *o, size_t need)
+/*
+ * 确保还能放下 need 个字节。
+ * 返回 0 = 可以写,-1 = 扩容失败。
+ *
+ * ★ 这里以前是 void,失败时直接 return —— 但那样 o->buf 还是旧的小缓冲区,
+ *   调用方却以为空间够了,接着 memcpy 就【堆越界】。realloc 失败虽然罕见,
+ *   但设备上内存紧张时是可能发生的,而越界写比"JSON 少几个字段"严重得多。
+ */
+static int reserve(struct ojson *o, size_t need)
 {
+	if (o->oom)
+		return -1;
 	if (o->len + need + 1 <= o->cap)
-		return;
-	size_t cap = o->cap ? o->cap : 256;
+		return 0;
 
-	while (cap < o->len + need + 1)
+	size_t cap = o->cap ? o->cap : 512;
+
+	/* 防止 cap 翻倍时溢出(理论上到不了,但不能留这个口子)*/
+	while (cap < o->len + need + 1) {
+		if (cap > (size_t)1 << 30) {
+			o->oom = 1;
+			return -1;
+		}
 		cap *= 2;
+	}
 	char *nb = realloc(o->buf, cap);
 
-	if (!nb)
-		return;			/* 内存不够就保持原样,宁可少写不要崩 */
+	if (!nb) {
+		o->oom = 1;
+		return -1;
+	}
 	o->buf = nb;
 	o->cap = cap;
+	return 0;
 }
 
 static void put(struct ojson *o, const char *s, size_t n)
 {
-	reserve(o, n);
-	if (!o->buf)
+	if (!o || o->oom || !s)
 		return;
+	if (reserve(o, n) != 0)
+		return;			/* 扩容失败:宁可不写,绝不越界 */
 	memcpy(o->buf + o->len, s, n);
 	o->len += n;
 	o->buf[o->len] = '\0';
@@ -154,7 +176,14 @@ char *oj_render(struct ojson *o)
 {
 	if (!o)
 		return NULL;
+	if (o->oom) {
+		/* 中途扩容失败过 —— 这时拼出来的 JSON 是残缺的,
+		   返回 NULL 让调用方知道"这次没成功",比给一段坏 JSON 好。 */
+		return NULL;
+	}
 	puts_(o, "}");
+	if (o->oom)
+		return NULL;
 	return o->buf ? strdup(o->buf) : NULL;
 }
 

@@ -59,11 +59,11 @@ int main(void)
 	mkfile("class/leds/green:wan/brightness", "0\n");
 
 	printf("── 读 ──\n");
-	T_EQ_STR(osys_read("/class/thermal/temp"), "58000");
+	T_EQ_STR_FREE(osys_read("/class/thermal/temp"), "58000");
 	T_EQ_INT(osys_read_int("/class/thermal/temp", -1), 58000);
 	T_EQ_INT(osys_read_int("/class/thermal/nope", -1), -1);
 	T_OK(osys_read("/class/thermal/nope") == NULL);
-	T_EQ_STR(osys_read("/class/leds/green:status/brightness"), "1");
+	T_EQ_STR_FREE(osys_read("/class/leds/green:status/brightness"), "1");
 
 	printf("── 存在性 ──\n");
 	T_OK(osys_exists("/class/leds/green:status") == 1);
@@ -79,19 +79,38 @@ int main(void)
 		snprintf(p, sizeof(p), "%s/class/leds/green:wan/w", ROOT);
 		T_OK(osys_write("/class/leds/green:wan/brightness", "7") == 0);
 		(void)p;
-		T_EQ_STR(osys_read("/class/leds/green:wan/brightness"), "7");
+		T_EQ_STR_FREE(osys_read("/class/leds/green:wan/brightness"), "7");
 		T_OK(osys_write_int("/class/leds/green:wan/brightness", 0) == 0);
-		T_EQ_STR(osys_read("/class/leds/green:wan/brightness"), "0");
+		T_EQ_STR_FREE(osys_read("/class/leds/green:wan/brightness"), "0");
 		T_OK(osys_write("/class/leds/nope/brightness", "1") == -1);
 		/* ★ 不存在的文件应当能被创建出来(自己的运行时文件靠这个)。
 		   注意父目录得先存在 —— osys_write 只建文件不建目录。 */
 		mkdir("/tmp/openfi-test-sys/var", 0755);
 		mkdir("/tmp/openfi-test-sys/var/run", 0755);
 		T_OK(osys_write("/var/run/newfile", "42") == 0);
-		T_EQ_STR(osys_read("/var/run/newfile"), "42");
+		T_EQ_STR_FREE(osys_read("/var/run/newfile"), "42");
 		/* 覆盖短值不能留下旧尾巴 */
 		T_OK(osys_write("/var/run/newfile", "7") == 0);
-		T_EQ_STR(osys_read("/var/run/newfile"), "7");
+		T_EQ_STR_FREE(osys_read("/var/run/newfile"), "7");
+
+		/*
+		 * ★ 超长值必须被【拒绝】。
+		 *   坑在于 snprintf 返回的是"不截断会写多少字节",不是"实际写了多少" ——
+		 *   拿它当长度去 write,就会从 buf 后面多读一截栈内存。
+		 *
+		 *   ⚠️ 这段必须放在 mkdir(var/run) 之后!第一次我写在前面,
+		 *      结果 open() 先失败了,不管有没有 bug 都返回 -1,
+		 *      测试"因为错误的原因通过",一点用都没有。
+		 */
+		{
+			char big[600];
+
+			memset(big, '9', sizeof(big) - 1);
+			big[sizeof(big) - 1] = '\0';
+			T_OK(osys_write("/var/run/bigfile", big) == -1);
+			/* 而且要确认它没被写进去半个 */
+			T_OK(osys_read("/var/run/bigfile") == NULL);
+		}
 	}
 
 	T_SUMMARY();

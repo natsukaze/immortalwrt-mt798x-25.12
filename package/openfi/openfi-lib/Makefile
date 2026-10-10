@@ -23,15 +23,21 @@ define Package/openfi-lib
   DEPENDS:=
 endef
 
-/*
- * ★ 必须有 install 段。
- *   OpenWrt 的打包规则是:没有 install 段就只打印
- *   "skipping <name> -- package has no install section",不产出 .ipk/.apk。
- *   而三个应用包都写着 DEPENDS:=+openfi-lib —— 依赖解析时找不到提供者,
- *   整个 image 构建就会失败。
- *   这个库是纯静态链接用的(staging 里有头文件和 .a 就够),
- *   所以运行期不需要装任何东西 —— 但包本身必须存在。
- */
+#
+# ★ 必须有 install 段。
+#   OpenWrt 的打包规则是:没有 install 段就只打印
+#   "skipping <name> -- package has no install section",不产出包文件。
+#   而三个应用包都写着 DEPENDS:=+openfi-lib —— 依赖解析时找不到提供者,
+#   整个 image 构建就会失败。
+#   这个库是纯静态链接用的(staging 里有头文件和 .a 就够),
+#   运行期不需要装任何东西 —— 但包本身必须存在。
+#
+# ★ 注意:这里的注释只能用 #,不能用 C 风格的 /* */。
+#   我第一版就是手滑写成 /* */ —— Makefile 解析直接失败,
+#   而 OpenWrt 的包扫描器(scan.mk)对解析失败的 Makefile 是【静默跳过】的,
+#   于是这个包在索引里根本不存在,构建到一半才报"依赖不存在",
+#   排查起来很绕(错误信息指向依赖,不指向那个坏掉的 Makefile)。
+#
 define Package/openfi-lib/install
 	$(INSTALL_DIR) $(1)/usr/lib
 endef
@@ -55,8 +61,7 @@ define Build/Compile
 	$(MAKE) -C $(PKG_BUILD_DIR) \
 		CC="$(TARGET_CC)" \
 		AR="$(TARGET_AR)" \
-		CFLAGS="$(TARGET_CFLAGS)" \
-		JSON_CFLAGS=""
+		CFLAGS="$(TARGET_CFLAGS)"
 endef
 
 define Build/InstallDev

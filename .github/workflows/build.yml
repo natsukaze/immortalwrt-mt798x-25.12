@@ -112,6 +112,19 @@ jobs:
 
           echo "----- 我们自己的包在不在树里、能不能被扫到 -----"
           # feed 扫描器靠 Makefile 里的 call BuildPackage 建索引；
+          # ★ Makefile 里不能用 C 风格的 /* */ 注释。
+          #   make 解析会直接失败，而 OpenWrt 的包扫描器(scan.mk)对
+          #   解析失败的 Makefile 是【静默跳过】的 —— 于是这个包在索引里
+          #   根本不存在，构建到一半才报"依赖 xxx 不存在"，
+          #   错误信息指向依赖、不指向那个坏掉的 Makefile，很难查。
+          #   （这个坑我真踩过：openfi-lib 就这样被跳过，整次构建白跑。）
+          for p in openfi-lib luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
+            f="package/openfi/$p/Makefile"
+            [ -e "$f" ] || continue
+            grep -qE '^[[:space:]]*/\*|^[[:space:]]*\*/' "$f" \
+              && { echo "::error::$f 里有 C 风格注释，make 解析会失败"; fail=1; }
+          done
+
           # 少了那行包会变成未知配置项，被 make defconfig 悄悄丢掉。
           for p in openfi-lib luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
             f="package/openfi/$p/Makefile"

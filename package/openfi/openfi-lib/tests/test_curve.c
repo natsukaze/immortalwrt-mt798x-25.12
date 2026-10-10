@@ -48,6 +48,24 @@ int main(void)
 	T_EQ_INT(curve_eval(&c, -80), 5);
 	T_EQ_INT(curve_eval(&c, -50), 5);
 
+	printf("── ★ 夹取:下限也要夹(防御性代码,得专门构造才测得到)──\n");
+	/*
+	 * 变异测试发现:"去掉下限夹取"没有任何测试能抓到。
+	 *   原因:curve_valid() 要求所有点都 >= min_y,所以对【合法曲线】
+	 *         下限夹取永远走不到 —— 它是防御性代码。
+	 *   但 API 并不强制先校验:调用方可以直接拿一张没校验过的表来查。
+	 *   所以这里故意装一张"低于下限"的表(不调 curve_valid),
+	 *   确认 curve_eval 仍然会把结果抬到下限之上。
+	 */
+	{
+		struct curve bad;
+
+		/* 第二个点 y=5 低于 min_y=20 —— 非法表,但我们要看夹取行为 */
+		CURVE_LOAD(&bad, CURVE_STEP, 20, 100, 0, 0, { 0, 5 }, { 50, 90 });
+		T_EQ_INT(curve_eval(&bad, 0), 20);    /* 被抬到下限 */
+		T_EQ_INT(curve_eval(&bad, 50), 90);   /* 正常值不动 */
+	}
+
 	printf("── 夹取 ──\n");
 	CURVE_LOAD(&c, CURVE_STEP, 0, 100, 0, 0, {0,0},{10,200});
 	T_EQ_INT(curve_eval(&c, 10), 100);     /* 表里的 200 被 max_y 夹住 */

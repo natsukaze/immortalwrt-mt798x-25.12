@@ -137,6 +137,84 @@ int main(void)
 		T_EQ_STR(buf, "{a}");
 	}
 
+	printf("── ★ 扩展表的【每一个】字符都要能原样往返 ──\n");
+	/*
+	 * 为什么要逐个测:
+	 *   扩展表的下标是 GSM 03.38 规范里定死的,手写极容易错位
+	 *   (我第一次就把 { 写在 0x7B、[ 写在 0x34 这种"按 ASCII 猜"的位置)。
+	 *   变异测试发现:只测 { } € 的话,把 [ 的下标改错也抓不到 ——
+	 *   所以这里把每一个都过一遍。
+	 */
+	{
+		const char *ext[] = { "\f", "^", "{", "}", "\\", "[", "~", "]", "|", "€", NULL };
+
+		for (int i = 0; ext[i]; i++) {
+			int n = sms_pack_7bit(ext[i], bytes, sizeof(bytes), &sept);
+
+			if (n < 0) { T_OK(0); continue; }   /* 编不进去就算失败 */
+			T_EQ_INT(sept, 2);                  /* 转义符 + 字符本身 */
+			sms_unpack_7bit(bytes, sept, buf, sizeof(buf));
+			T_EQ_STR(buf, ext[i]);
+		}
+	}
+
+	printf("── ★ 扩展字符的编码值必须符合规范(不能只测往返)──\n");
+	/*
+	 * 为什么单靠往返不够:
+	 *   pack 和 unpack 用的是同一张表,所以把 [ 的下标从 0x3C 改成 0x34,
+	 *   往返【照样通过】—— 自己跟自己一致,和 GSM 03.38 规范无关。
+	 *   变异测试就是这么发现这个盲区的。
+	 *   所以这里直接断言编码出来的 septet 值,对照规范:
+	 *     \f=0x0A  ^=0x14  {=0x28  }=0x29  \=0x2F
+	 *     [=0x3C  ~=0x3D  ]=0x3E  |=0x40  €=0x65
+	 */
+	{
+		static const struct { const char *ch; unsigned char code; } ext[] = {
+			{ "\f", 0x0A }, { "^", 0x14 }, { "{", 0x28 }, { "}", 0x29 },
+			{ "\\", 0x2F }, { "[", 0x3C }, { "~", 0x3D }, { "]", 0x3E },
+			{ "|", 0x40 }, { "€", 0x65 },
+		};
+		unsigned char enc[8];
+
+		for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++) {
+			int n = sms_pack_7bit(ext[i].ch, enc, sizeof(enc), &sept);
+
+			T_EQ_INT(n >= 0, 1);
+			T_EQ_INT(sept, 2);                 /* 转义符 + 字符本身 */
+			/* 第一个 septet 是 0x1B(转义),第二个是规范里定死的值 */
+			T_EQ_INT(enc[0] & 0x7F, 0x1B);
+			/*
+			 * 取出第二个 septet。
+			 * 位布局:septet0 占 bit 0..6,septet1 占 bit 7..13。
+			 * 所以 CODE = (byte0 的 bit7) | (byte1 的 bit0..5 左移 1)。
+			 * 我第一版写成 (enc[1] >> 1) & 0x7F —— 那是按"septet1 从 bit8
+			 * 开始"算的,差了 1 位,结果全部对不上(12 项失败)。
+			 * 好在这个测试自己把这个错误抓出来了。
+			 */
+			unsigned int got = (unsigned)((enc[0] >> 7) & 0x01)
+					 | ((unsigned)(enc[1] & 0x3F) << 1);
+
+			T_EQ_INT(got, ext[i].code);
+		}
+	}
+
+	printf("── ★ 默认表里非 ASCII 的那些字符也要逐个往返 ──\n");
+	{
+		/* 这些位置的值和 ASCII 不一样,写错一个就是显示成别的字符 */
+		const char *sp[] = { "@", "£", "$", "¥", "è", "é", "ù", "ì", "ò", "Ç",
+				     "Ø", "ø", "Å", "å", "Δ", "_", "Φ", "Γ", "Λ", "Ω",
+				     "Æ", "æ", "ß", "É", "¤", "¡", "Ä", "Ö", "Ñ", "Ü",
+				     "§", "¿", "ä", "ö", "ñ", "ü", "à", NULL };
+
+		for (int i = 0; sp[i]; i++) {
+			int n = sms_pack_7bit(sp[i], bytes, sizeof(bytes), &sept);
+
+			if (n < 0) { T_OK(0); continue; }
+			sms_unpack_7bit(bytes, sept, buf, sizeof(buf));
+			T_EQ_STR(buf, sp[i]);
+		}
+	}
+
 	printf("── 中文编不进 7 位(应失败,让调用方走 UCS2)──\n");
 	T_EQ_INT(sms_pack_7bit("中文", bytes, sizeof(bytes), &sept), -1);
 

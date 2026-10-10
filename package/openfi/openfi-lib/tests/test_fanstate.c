@@ -51,6 +51,24 @@ int main(void)
 	T_EQ_INT(fan_state_step(&st, 90, t += 1000), 100);
 	T_EQ_INT(st.last_reason, FAN_R_EMERGENCY);
 
+	printf("── ★ 边界:正好等于紧急温度就要满转(>= 不是 >)──\n");
+	/*
+	 * 变异测试发现:原来只用 90℃ 测(离 85 很远),把 >= 改成 > 也抓不到。
+	 * 紧急保护这种东西恰恰是"差一度"要命,必须卡在边界上测。
+	 */
+	{
+		struct fan_state b;
+
+		fan_state_init(&b, &cfg, 75);
+		T_EQ_INT(fan_state_step(&b, cfg.emergency_temp, 1000), 100);
+		T_EQ_INT(b.last_reason, FAN_R_EMERGENCY);
+
+		fan_state_init(&b, &cfg, 75);
+		T_EQ_INT(fan_state_step(&b, cfg.emergency_temp - 1, 1000),
+			 b.cfg.s4);              /* 差一度就按曲线走 */
+		T_EQ_INT(b.last_reason, FAN_R_CURVE);
+	}
+
 	printf("── 静默模式:停 ──\n");
 	fan_state_set_silent(&st, 1);
 	T_EQ_INT(fan_state_step(&st, 40, t += 1000), 0);
@@ -65,6 +83,21 @@ int main(void)
 	T_EQ_INT(st.last_reason, FAN_R_SILENT);
 	T_EQ_INT(fan_state_step(&st, 76, t += 1000), 100);   /* 再回到 76 */
 	T_EQ_INT(st.last_reason, FAN_R_SILENT_HOT);
+	printf("── ★ 边界:正好等于静默兜底温度就要强制开(>= 不是 >)──\n");
+	{
+		struct fan_state b;
+
+		fan_state_init(&b, &cfg, 75);
+		fan_state_set_silent(&b, 1);
+		T_EQ_INT(fan_state_step(&b, 75, 1000), b.cfg.s4);
+		T_EQ_INT(b.last_reason, FAN_R_SILENT_HOT);
+
+		fan_state_init(&b, &cfg, 75);
+		fan_state_set_silent(&b, 1);
+		T_EQ_INT(fan_state_step(&b, 74, 1000), 0);      /* 差一度就继续停 */
+		T_EQ_INT(b.last_reason, FAN_R_SILENT);
+	}
+
 	printf("── 静默中到紧急温度:拉满(优先级最高)──\n");
 	T_EQ_INT(fan_state_step(&st, 90, t += 1000), 100);
 	T_EQ_INT(st.last_reason, FAN_R_EMERGENCY);

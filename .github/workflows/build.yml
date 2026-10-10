@@ -101,7 +101,7 @@ jobs:
           chk feeds.conf.default
 
           echo "----- defconfig 里选的是我们的设备吗 -----"
-          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_openfi_6c=y' defconfig/openfi6c.config \
+          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=y' defconfig/openfi6c.config \
             || { echo "::error::defconfig 没选 openfi_6c"; fail=1; }
 
           echo "----- defconfig 不该再带 MULTI_PROFILE -----"
@@ -235,10 +235,10 @@ jobs:
           make defconfig
 
           echo "----- 关键配置确认 -----"
-          grep -E 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_openfi_6c=|CONFIG_PACKAGE_kmod-mt_wifi=|CONFIG_MTK_MT_WIFI_DRIVER_VERSION_|CONFIG_PACKAGE_mtwifi-cfg-ucode=|CONFIG_PACKAGE_iwinfo-ucode=' .config || true
+          grep -E 'CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=|CONFIG_PACKAGE_kmod-mt_wifi=|CONFIG_MTK_MT_WIFI_DRIVER_VERSION_|CONFIG_PACKAGE_mtwifi-cfg-ucode=|CONFIG_PACKAGE_iwinfo-ucode=' .config || true
 
           echo "----- 断言设备选中 -----"
-          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_openfi_6c=y' .config \
+          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=y' .config \
             || { echo "::error::openfi_6c 没进 .config"; exit 1; }
           echo "OK: 设备 = openfi_6c"
 
